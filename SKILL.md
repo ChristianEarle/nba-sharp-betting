@@ -95,6 +95,19 @@ As of late 2025, Kalshi offers several NBA market categories:
 - Use sportsbook spread consensus (Pinnacle) as the baseline to compare against Kalshi prices
 - Edges found the same way as moneylines: model implied probability vs. Kalshi price
 
+**Kalshi Spread Symmetry Rule:** Kalshi lists spreads from one team's perspective, but the
+opposing team's contract is the mirror. A "Team A +4" YES contract is equivalent to
+"Team B -4" NO contract. Concretely:
+
+- "Lakers +4" YES at 55¢ = "Celtics -4" NO at 55¢
+- If you think the Lakers will keep it within 4, you can EITHER buy "Lakers +4" YES
+  OR sell "Celtics -4" YES (buy NO) — same position, same payout
+- **Always check both sides of the orderbook.** One side may have better liquidity or
+  a tighter spread. If "Lakers +4" YES has a 5¢ wide spread but "Celtics -4" NO has
+  a 2¢ spread, trade the Celtics side for better execution.
+- When computing edge, make sure you're not double-counting: +4 for Team A and -4 for
+  Team B are the SAME market, not two separate opportunities.
+
 ### Combo Markets (Parlays)
 - Kalshi introduced "combos" in 2025 mimicking traditional parlays
 - Correlation between legs is often mispriced — this is where sharp money looks
