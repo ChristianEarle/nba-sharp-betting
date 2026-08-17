@@ -1,0 +1,1089 @@
+[
+  {
+    "label": "pull-team season=2020",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/odds?regions=us&markets=h2h,spreads,totals&oddsFormat=american&date=2020-09-06T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T20:58:24.837688+00:00",
+    "cost_credits": 30,
+    "headers": {
+      "x-requests-remaining": "19970",
+      "x-requests-used": "30"
+    },
+    "season": 2020,
+    "markets": [
+      "h2h",
+      "spreads",
+      "totals"
+    ],
+    "snapshot": "2020-09-06T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2020_h2h+spreads+totals_2020-09-06T120000Z.json"
+  },
+  {
+    "label": "pull-team season=2021",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/odds?regions=us&markets=h2h,spreads,totals&oddsFormat=american&date=2021-09-05T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T20:58:25.562634+00:00",
+    "cost_credits": 30,
+    "headers": {
+      "x-requests-remaining": "19940",
+      "x-requests-used": "60"
+    },
+    "season": 2021,
+    "markets": [
+      "h2h",
+      "spreads",
+      "totals"
+    ],
+    "snapshot": "2021-09-05T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2021_h2h+spreads+totals_2021-09-05T120000Z.json"
+  },
+  {
+    "label": "pull-team season=2022",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/odds?regions=us&markets=h2h,spreads,totals&oddsFormat=american&date=2022-09-04T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T20:58:26.445873+00:00",
+    "cost_credits": 30,
+    "headers": {
+      "x-requests-remaining": "19910",
+      "x-requests-used": "90"
+    },
+    "season": 2022,
+    "markets": [
+      "h2h",
+      "spreads",
+      "totals"
+    ],
+    "snapshot": "2022-09-04T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2022_h2h+spreads+totals_2022-09-04T120000Z.json"
+  },
+  {
+    "label": "pull-team season=2023",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/odds?regions=us&markets=h2h,spreads,totals&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T20:58:27.794906+00:00",
+    "cost_credits": 30,
+    "headers": {
+      "x-requests-remaining": "19880",
+      "x-requests-used": "120"
+    },
+    "season": 2023,
+    "markets": [
+      "h2h",
+      "spreads",
+      "totals"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_h2h+spreads+totals_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "pull-team season=2024",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/odds?regions=us&markets=h2h,spreads,totals&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T20:58:29.113804+00:00",
+    "cost_credits": 30,
+    "headers": {
+      "x-requests-remaining": "19850",
+      "x-requests-used": "150"
+    },
+    "season": 2024,
+    "markets": [
+      "h2h",
+      "spreads",
+      "totals"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_h2h+spreads+totals_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "pull-team season=2025",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/odds?regions=us&markets=h2h,spreads,totals&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T20:58:30.478210+00:00",
+    "cost_credits": 30,
+    "headers": {
+      "x-requests-remaining": "19820",
+      "x-requests-used": "180"
+    },
+    "season": 2025,
+    "markets": [
+      "h2h",
+      "spreads",
+      "totals"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_h2h+spreads+totals_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "events-lookup season=2023",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events?date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:01:25.989195+00:00",
+    "cost_credits": 1,
+    "headers": {
+      "x-requests-remaining": "19819",
+      "x-requests-used": "181"
+    },
+    "season": 2023,
+    "markets": [],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_events_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Detroit Lions @ Kansas City Chiefs",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/42db668449664943833b5c04a583328a/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_pass_interceptions,player_rush_yds,player_rush_attempts,player_reception_yds,player_receptions,player_anytime_td&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:01:26.682031+00:00",
+    "cost_credits": 80,
+    "headers": {
+      "x-requests-remaining": "19749",
+      "x-requests-used": "251"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_pass_interceptions",
+      "player_rush_yds",
+      "player_rush_attempts",
+      "player_reception_yds",
+      "player_receptions",
+      "player_anytime_td"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_42db668449664943833b5c04a583328a_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "events-lookup season=2023",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events?date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:38.448658+00:00",
+    "cost_credits": 1,
+    "headers": {
+      "x-requests-remaining": "19748",
+      "x-requests-used": "252"
+    },
+    "season": 2023,
+    "markets": [],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_events_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Detroit Lions @ Kansas City Chiefs",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/42db668449664943833b5c04a583328a/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:39.230443+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_42db668449664943833b5c04a583328a_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Arizona Cardinals @ Washington Commanders",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/175d9f07fc52d99b21bc772b1499c3d8/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:39.943345+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_175d9f07fc52d99b21bc772b1499c3d8_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Carolina Panthers @ Atlanta Falcons",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/6c2d3077c50eece8e6a37742d1ac5756/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:40.626626+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_6c2d3077c50eece8e6a37742d1ac5756_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Houston Texans @ Baltimore Ravens",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/33368d4979d3475b77f5e9eb49648203/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:41.329962+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_33368d4979d3475b77f5e9eb49648203_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Cincinnati Bengals @ Cleveland Browns",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/35294c242bcfdb30c9f58dc6f68da6b2/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:41.990549+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_35294c242bcfdb30c9f58dc6f68da6b2_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Jacksonville Jaguars @ Indianapolis Colts",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/1278f44be0d97920fd149f7cdfc9574d/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:42.630396+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_1278f44be0d97920fd149f7cdfc9574d_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Tampa Bay Buccaneers @ Minnesota Vikings",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/b3763a6d678b9787e27cec3272252e24/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:43.328859+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_b3763a6d678b9787e27cec3272252e24_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Tennessee Titans @ New Orleans Saints",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/bbe791f371726d950a509d928f4c65cd/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:43.971355+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_bbe791f371726d950a509d928f4c65cd_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 San Francisco 49ers @ Pittsburgh Steelers",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/741437df0e5c0350c32ce707161bd423/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:44.755299+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_741437df0e5c0350c32ce707161bd423_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Green Bay Packers @ Chicago Bears",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/54b900ff32cfc8ad40f4d856fc5a4985/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:45.502441+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_54b900ff32cfc8ad40f4d856fc5a4985_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Las Vegas Raiders @ Denver Broncos",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/4d18f524fdaa6d8d7f81f9803a43d5f0/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:46.256398+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_4d18f524fdaa6d8d7f81f9803a43d5f0_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Miami Dolphins @ Los Angeles Chargers",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/d543cbc3d38bed6c7c727e3cabc1188e/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:47.083859+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_d543cbc3d38bed6c7c727e3cabc1188e_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Los Angeles Rams @ Seattle Seahawks",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/d818062d65dfa411c269ee61943655cd/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:47.777461+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_d818062d65dfa411c269ee61943655cd_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Philadelphia Eagles @ New England Patriots",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/0a368c64b212ecbad4ec46f6ff6c1af2/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:48.507473+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_0a368c64b212ecbad4ec46f6ff6c1af2_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2023 Dallas Cowboys @ New York Giants",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/2dd1bc48e4929ba7ed2b38fc668b1609/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2023-09-03T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:49.290810+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19698",
+      "x-requests-used": "302"
+    },
+    "season": 2023,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2023-09-03T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2023_week1_props_2dd1bc48e4929ba7ed2b38fc668b1609_2023-09-03T120000Z.json"
+  },
+  {
+    "label": "events-lookup season=2024",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events?date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:50.364049+00:00",
+    "cost_credits": 1,
+    "headers": {
+      "x-requests-remaining": "19697",
+      "x-requests-used": "303"
+    },
+    "season": 2024,
+    "markets": [],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_events_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Baltimore Ravens @ Kansas City Chiefs",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/612c2c3f6ca9e10d4b7ead21a2b0ff38/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:51.131847+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19647",
+      "x-requests-used": "353"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_612c2c3f6ca9e10d4b7ead21a2b0ff38_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Green Bay Packers @ Philadelphia Eagles",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/eca3b71919531e7ae0b4f3f501157e6c/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:51.872737+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19607",
+      "x-requests-used": "393"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_eca3b71919531e7ae0b4f3f501157e6c_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Arizona Cardinals @ Buffalo Bills",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/7a5e353202d40a844491fa5753bc3097/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:52.610532+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19557",
+      "x-requests-used": "443"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_7a5e353202d40a844491fa5753bc3097_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Pittsburgh Steelers @ Atlanta Falcons",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/92665529cce6b8089e793d1e7d5e4b66/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:53.328399+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19507",
+      "x-requests-used": "493"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_92665529cce6b8089e793d1e7d5e4b66_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Carolina Panthers @ New Orleans Saints",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/022add645ca37d612dbb69e8ef02f6b9/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:54.063825+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19457",
+      "x-requests-used": "543"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_022add645ca37d612dbb69e8ef02f6b9_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Tennessee Titans @ Chicago Bears",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/b5b9d07cdd5c7bd14e943ccd7973e6a2/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:54.726606+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19417",
+      "x-requests-used": "583"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_b5b9d07cdd5c7bd14e943ccd7973e6a2_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 New England Patriots @ Cincinnati Bengals",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/5f14ebd3a8f10d141a7f0c2dcf510368/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:55.431735+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19377",
+      "x-requests-used": "623"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_5f14ebd3a8f10d141a7f0c2dcf510368_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Houston Texans @ Indianapolis Colts",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/60fdc65ee27ab7dbe07dc06ef35afadc/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:56.094595+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19327",
+      "x-requests-used": "673"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_60fdc65ee27ab7dbe07dc06ef35afadc_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Jacksonville Jaguars @ Miami Dolphins",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/8c0e75b0a4ea07212e741acf25ad96b6/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:56.847530+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19287",
+      "x-requests-used": "713"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_8c0e75b0a4ea07212e741acf25ad96b6_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Minnesota Vikings @ New York Giants",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/c483f5c8e0ee5f1f5abdd75870eeeffc/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:57.589101+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19247",
+      "x-requests-used": "753"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_c483f5c8e0ee5f1f5abdd75870eeeffc_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Denver Broncos @ Seattle Seahawks",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/afb7e137dbb2a3de38d2d3cb68897e3b/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:58.308591+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19207",
+      "x-requests-used": "793"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_afb7e137dbb2a3de38d2d3cb68897e3b_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Las Vegas Raiders @ Los Angeles Chargers",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/a2f9dcdf49ccacf33036a0b795413a6e/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:59.019334+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19167",
+      "x-requests-used": "833"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_a2f9dcdf49ccacf33036a0b795413a6e_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Dallas Cowboys @ Cleveland Browns",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/a1682ca5d9e0c4b14d19ed69d6299806/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:44:59.761446+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19127",
+      "x-requests-used": "873"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_a1682ca5d9e0c4b14d19ed69d6299806_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Washington Commanders @ Tampa Bay Buccaneers",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/ba439e5505ce1ee745d2e48f2d2f31e6/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:00.512326+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19087",
+      "x-requests-used": "913"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_ba439e5505ce1ee745d2e48f2d2f31e6_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2024 Los Angeles Rams @ Detroit Lions",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/fa20351fa9ca26c47f93abc8a9b2c941/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2024-09-01T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:01.227677+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "19047",
+      "x-requests-used": "953"
+    },
+    "season": 2024,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2024-09-01T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2024_week1_props_fa20351fa9ca26c47f93abc8a9b2c941_2024-09-01T120000Z.json"
+  },
+  {
+    "label": "events-lookup season=2025",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events?date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:02.439552+00:00",
+    "cost_credits": 1,
+    "headers": {
+      "x-requests-remaining": "19046",
+      "x-requests-used": "954"
+    },
+    "season": 2025,
+    "markets": [],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_events_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Dallas Cowboys @ Philadelphia Eagles",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/f1bc532dff946d15cb85654b5c4b246e/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:03.408420+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18996",
+      "x-requests-used": "1004"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_f1bc532dff946d15cb85654b5c4b246e_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Kansas City Chiefs @ Los Angeles Chargers",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/9535d3e3ee9d9fc83ea2b500ad0b587c/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:04.231018+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18946",
+      "x-requests-used": "1054"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_9535d3e3ee9d9fc83ea2b500ad0b587c_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Tampa Bay Buccaneers @ Atlanta Falcons",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/1e09eb3fe1385796c1a32000de48ac64/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:05.118733+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18896",
+      "x-requests-used": "1104"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_1e09eb3fe1385796c1a32000de48ac64_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Carolina Panthers @ Jacksonville Jaguars",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/394256a6c3d0f5ecd1208fffaae6a72f/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:06.066678+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18846",
+      "x-requests-used": "1154"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_394256a6c3d0f5ecd1208fffaae6a72f_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 New York Giants @ Washington Commanders",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/4cce00ca468c67eca17a9a061f778fb2/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:06.879832+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18796",
+      "x-requests-used": "1204"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_4cce00ca468c67eca17a9a061f778fb2_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Arizona Cardinals @ New Orleans Saints",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/557d13ef8f4c1d21044f3a478cda6d0b/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:07.755955+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18746",
+      "x-requests-used": "1254"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_557d13ef8f4c1d21044f3a478cda6d0b_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Cincinnati Bengals @ Cleveland Browns",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/e2d3b0596efcebc1c19dab92009f5e26/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:08.675730+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18696",
+      "x-requests-used": "1304"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_e2d3b0596efcebc1c19dab92009f5e26_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Miami Dolphins @ Indianapolis Colts",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/b02a72c768a6c6dee87aa74f78e84176/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:09.514725+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18646",
+      "x-requests-used": "1354"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_b02a72c768a6c6dee87aa74f78e84176_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Las Vegas Raiders @ New England Patriots",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/0b2455795dfcd692dd607503e4f20d04/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:10.331692+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18596",
+      "x-requests-used": "1404"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_0b2455795dfcd692dd607503e4f20d04_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Pittsburgh Steelers @ New York Jets",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/5ed483bb614b18955f8b43f177746371/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:11.302655+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18546",
+      "x-requests-used": "1454"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_5ed483bb614b18955f8b43f177746371_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Tennessee Titans @ Denver Broncos",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/68397f3aa9eb847a421a49f990a11928/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:12.291078+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18496",
+      "x-requests-used": "1504"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_68397f3aa9eb847a421a49f990a11928_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 San Francisco 49ers @ Seattle Seahawks",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/9f1ad249959aacae89e5e74e43429a4a/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:13.178667+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18446",
+      "x-requests-used": "1554"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_9f1ad249959aacae89e5e74e43429a4a_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Detroit Lions @ Green Bay Packers",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/8e0e2d9237098222f9ca7554b11b12bb/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:14.005181+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18396",
+      "x-requests-used": "1604"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_8e0e2d9237098222f9ca7554b11b12bb_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Houston Texans @ Los Angeles Rams",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/dc0e3db61983a138098f28226788d2d3/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:14.822609+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18346",
+      "x-requests-used": "1654"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_dc0e3db61983a138098f28226788d2d3_2025-08-31T120000Z.json"
+  },
+  {
+    "label": "week1-props season=2025 Baltimore Ravens @ Buffalo Bills",
+    "url": "https://api.the-odds-api.com/v4/historical/sports/americanfootball_nfl/events/dee0a41ed5e8201a96d457899adbe918/odds?regions=us&markets=player_pass_yds,player_pass_tds,player_rush_yds,player_reception_yds,player_receptions&oddsFormat=american&date=2025-08-31T12:00:00Z&apiKey=REDACTED",
+    "timestamp": "2026-08-17T21:45:15.674658+00:00",
+    "cost_credits": 50,
+    "headers": {
+      "x-requests-remaining": "18296",
+      "x-requests-used": "1704"
+    },
+    "season": 2025,
+    "markets": [
+      "player_pass_yds",
+      "player_pass_tds",
+      "player_rush_yds",
+      "player_reception_yds",
+      "player_receptions"
+    ],
+    "snapshot": "2025-08-31T12:00:00Z",
+    "out_file": "data\\external\\odds_api\\raw\\2025_week1_props_dee0a41ed5e8201a96d457899adbe918_2025-08-31T120000Z.json"
+  }
+]

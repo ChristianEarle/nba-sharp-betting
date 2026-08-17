@@ -73,6 +73,7 @@ states the verdict plainly rather than hiding it.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import warnings
 from dataclasses import dataclass
@@ -216,12 +217,24 @@ def load_modeling_frame(
     return df.reset_index(drop=True)
 
 
-def tree_feature_columns(df: pd.DataFrame) -> list[str]:
+def tree_feature_columns(df: pd.DataFrame, cfg: dict | None = None) -> list[str]:
     """Every numeric column except identity/label columns. Includes the adp_source_* dummies
 
     (already attached by load_modeling_frame) and expectation_pos_rank.
+
+    ``cfg``'s optional ``excluded_features`` list (v1.5 Phase C -- the
+    Vegas-feature promotion rule) additionally drops any named column that
+    would otherwise qualify: a position that keeps its v1.5 model per the
+    promotion rule ("ties/regressions -> keep v1.5 model, keep the
+    features in the matrix as nullable but excluded from that position's
+    model config") lists ``implied_ppg``/``implied_win_prob``/``has_vegas``
+    here so the matrix still carries them (for auditing/future
+    experiments) while this position's own trees never see them. Absent
+    or empty for a promoted position, matching every other position's
+    default of "every numeric column."
     """
-    return [c for c in df.columns if c not in NON_FEATURE_COLS]
+    excluded = set(cfg.get("excluded_features", [])) if cfg else set()
+    return [c for c in df.columns if c not in NON_FEATURE_COLS and c not in excluded]
 
 
 def logistic_feature_columns(cfg: dict) -> list[str]:
@@ -883,13 +896,31 @@ def run_full_pipeline(
     classifier_trials: int | None = None,
     regression_trials: int | None = None,
     seed: int | None = None,
+    output_root: Path | None = None,
 ) -> dict:
     """Tune -> blend -> calibrate -> ONE holdout eval -> save artifacts. Returns everything
 
     the report/metrics-JSON writers and the tests need. `classifier_trials` /
     `regression_trials` / `seed` override cfg (used by tests for a tiny, fast config);
     leave None for the real Deliverable-4 run.
+
+    ``output_root`` redirects every artifact this run writes (bundle, report,
+    metrics JSON) into that directory, leaving the production paths untouched.
+    Any run that is not the real training run — tests above all — MUST pass it:
+    the production bundles under data/models/ are the shipped model, and a
+    5-trial tiny run writing over them silently degrades the board. That
+    exact clobbering happened in practice and was only caught by comparing
+    artifact timestamps against reported metrics.
     """
+    if output_root is not None:
+        output_root = Path(output_root)
+        output_root.mkdir(parents=True, exist_ok=True)
+        spec = dataclasses.replace(
+            spec,
+            report_path=output_root / spec.report_path.name,
+            metrics_json_path=output_root / spec.metrics_json_path.name,
+            artifact_path=output_root / spec.artifact_path.name,
+        )
     if cfg is None:
         cfg = load_config(spec.config_path)
     seed = cfg["seed"] if seed is None else seed
@@ -899,7 +930,7 @@ def run_full_pipeline(
     np.random.seed(seed)
 
     df = load_modeling_frame(spec.features_path, spec.labels_path, cfg=cfg)
-    tree_cols = tree_feature_columns(df)
+    tree_cols = tree_feature_columns(df, cfg=cfg)
     logit_cols = logistic_feature_columns(cfg)
     folds = validation_folds()
 

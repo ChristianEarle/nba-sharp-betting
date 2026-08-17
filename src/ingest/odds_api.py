@@ -307,6 +307,70 @@ def cheap_futures_requests(cfg: dict, snapshot_dates: dict[int, str], verified_m
     return reqs
 
 
+def week1_window(season: int, schedules_path: Path = SCHEDULES_PATH) -> tuple[date, date]:
+    """[first, last] gameday of a season's Week 1, from schedules.parquet."""
+    df = pl.read_parquet(schedules_path)
+    reg = df.filter((pl.col("game_type") == "REG") & (pl.col("season") == season))
+    first_week = reg.get_column("week").min()
+    wk = reg.filter(pl.col("week") == first_week)
+    return (
+        date.fromisoformat(str(wk.get_column("gameday").min())),
+        date.fromisoformat(str(wk.get_column("gameday").max())),
+    )
+
+
+def historical_events_request(cfg: dict, season: int, snapshot: str) -> PlannedRequest:
+    """Historical events lookup for one snapshot -- the API bills this endpoint at 1 credit."""
+    return PlannedRequest(
+        label=f"events-lookup season={season}",
+        endpoint=f"/historical/sports/{cfg['sport_key']}/events",
+        params={"date": snapshot},
+        markets=[],
+        regions=[],
+        season=season,
+        snapshot=snapshot,
+        est_cost=1,
+        file_stub=f"{season}_events_{_filename_safe(snapshot)}",
+    )
+
+
+def week1_events(cfg: dict, season: int, events_payload: dict) -> list[dict]:
+    """Filter an events-lookup payload to the season's Week-1 games, by commence date."""
+    start, end = week1_window(season)
+    out = []
+    for ev in events_payload.get("data", []):
+        commence = ev.get("commence_time", "")
+        if not commence:
+            continue
+        d = date.fromisoformat(commence[:10])
+        if start <= d <= end:
+            out.append(ev)
+    return out
+
+
+def event_props_request(cfg: dict, season: int, snapshot: str, event: dict) -> PlannedRequest:
+    """Per-event historical player-prop odds for one Week-1 game."""
+    markets = list(cfg["event_prop_markets"])
+    regions = [cfg["region"]]
+    event_id = event["id"]
+    return PlannedRequest(
+        label=f"week1-props season={season} {event.get('away_team','?')} @ {event.get('home_team','?')}",
+        endpoint=f"/historical/sports/{cfg['sport_key']}/events/{event_id}/odds",
+        params={
+            "regions": ",".join(regions),
+            "markets": ",".join(markets),
+            "oddsFormat": "american",
+            "date": snapshot,
+        },
+        markets=markets,
+        regions=regions,
+        season=season,
+        snapshot=snapshot,
+        est_cost=estimate_cost(len(regions), len(markets)),
+        file_stub=f"{season}_week1_props_{event_id}_{_filename_safe(snapshot)}",
+    )
+
+
 def expensive_props_requests(cfg: dict, snapshot_dates: dict[int, str]) -> list[PlannedRequest]:
     """--pull-props' fallback path: Week-1 event-level player-prop odds, 2023-2025.
 
@@ -347,9 +411,17 @@ def full_request_plan(cfg: dict) -> dict[str, list[PlannedRequest]]:
     --dry-run time, so which branch a real run takes is unknown) -- the plan --dry-run prints.
     """
     snapshot_dates = snapshot_dates_for_seasons(cfg["snapshot_seasons"])
-    verify_req = verify_futures_request(cfg, snapshot_dates)
+    # One probe per candidate market, mirroring run_verify_futures -- the plan
+    # must show what the run will actually issue, not the old single batch call.
+    verify_reqs = [
+        r
+        for r in (
+            single_market_probe_request(cfg, snapshot_dates, m) for m in cfg["candidate_futures_markets"]
+        )
+        if r is not None
+    ]
     return {
-        "verify_futures": [verify_req] if verify_req else [],
+        "verify_futures": verify_reqs,
         "pull_team": team_snapshot_requests(cfg, snapshot_dates),
         "pull_props_cheap_if_futures_found": cheap_futures_requests(
             cfg, snapshot_dates, cfg["candidate_futures_markets"]
@@ -403,6 +475,33 @@ def print_plan(cfg: dict) -> None:
 # --------------------------------------------------------------------------
 
 
+def _norm_headers(headers: Any) -> dict[str, str]:
+    """Lowercase-keyed copy of a response's headers.
+
+    ``requests`` returns a case-insensitive mapping, but ``dict(resp.headers)``
+    freezes whatever casing the server happened to send -- after which a
+    ``.get("x-requests-remaining")`` silently misses a ``X-Requests-Remaining``.
+    Normalising once here keeps every downstream lookup honest.
+    """
+    return {str(k).lower(): v for k, v in dict(headers).items()}
+
+
+class OddsAPIError(RuntimeError):
+    """A non-2xx response that the caller did not declare tolerable.
+
+    Carries the status, an already-redacted URL and a body snippet, so the
+    error can be surfaced without ever routing the API key through a
+    traceback (``requests``' own HTTPError embeds the full request URL,
+    api key included).
+    """
+
+    def __init__(self, status_code: int, redacted_url: str, body_snippet: str) -> None:
+        self.status_code = status_code
+        self.redacted_url = redacted_url
+        self.body_snippet = body_snippet
+        super().__init__(f"HTTP {status_code} for {redacted_url}: {body_snippet}")
+
+
 @dataclass
 class CreditTracker:
     budget: int
@@ -425,11 +524,23 @@ class CreditTracker:
                 "x-requests-remaining header)."
             )
 
-    def record(self, headers: dict, planned_cost: int, label: str) -> dict:
+    def observe_quota(self, headers: dict) -> None:
+        """Update the API-reported ledger from ANY response, success or failure.
+
+        Split out of ``record`` so a non-2xx response's quota headers are still
+        captured. The previous ``raise_for_status()``-before-``record()`` ordering
+        threw the response away on error, blinding credit reporting on exactly
+        the failures where the remaining quota matters most.
+        """
         remaining = headers.get("x-requests-remaining")
         used = headers.get("x-requests-used")
-        self.remaining_from_api = int(remaining) if remaining is not None else self.remaining_from_api
-        self.used_from_api = int(used) if used is not None else self.used_from_api
+        if remaining is not None:
+            self.remaining_from_api = int(remaining)
+        if used is not None:
+            self.used_from_api = int(used)
+
+    def record(self, headers: dict, planned_cost: int, label: str) -> dict:
+        self.observe_quota(headers)
         self.spent_est += planned_cost
         snap = {
             "label": label,
@@ -499,8 +610,21 @@ def _api_key() -> str:
     return key
 
 
-def execute_request(cfg: dict, req: PlannedRequest, tracker: CreditTracker, *, out_dir: Path = RAW_DIR) -> Path:
+def execute_request(
+    cfg: dict,
+    req: PlannedRequest,
+    tracker: CreditTracker,
+    *,
+    out_dir: Path = RAW_DIR,
+    tolerate_statuses: tuple[int, ...] = (),
+) -> Path | None:
     """Issue one planned request, write the raw response verbatim, append the manifest, update the tracker.
+
+    Returns the written path, or ``None`` when the response carried one of
+    ``tolerate_statuses`` (used by the per-market futures probe, where a 422
+    is the API's way of saying "no such market key" -- a result, not a fault).
+    Any other non-2xx raises ``OddsAPIError``, which unlike ``requests``'
+    HTTPError never carries the unredacted URL.
 
     Imports ``requests`` lazily so nothing in this module needs the
     dependency merely to be imported by tests / --dry-run / --normalize.
@@ -513,34 +637,111 @@ def execute_request(cfg: dict, req: PlannedRequest, tracker: CreditTracker, *, o
     url = build_url(cfg, req, api_key)
     print(f"GET {req.label} -> {redact_url(url, api_key)}")
     resp = requests.get(url, timeout=60)
-    resp.raise_for_status()
+
+    # Read the account ledger BEFORE any status check -- see observe_quota's
+    # docstring for why the old raise-first ordering was a reporting hole.
+    headers = _norm_headers(resp.headers)
+    tracker.observe_quota(headers)
+
+    if resp.status_code != 200:
+        print(
+            f"  -> HTTP {resp.status_code} | api remaining={tracker.remaining_from_api} "
+            f"used={tracker.used_from_api}"
+        )
+        if resp.status_code in tolerate_statuses:
+            return None
+        raise OddsAPIError(
+            resp.status_code, redact_url(url, api_key), redact_url(resp.text[:300], api_key)
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{req.file_stub}.json"
     out_path.write_text(resp.text)
 
-    snap = tracker.record(dict(resp.headers), req.est_cost, req.label)
-    append_manifest(manifest_entry(req, url=url, api_key=api_key, cost_credits=req.est_cost, headers=snap, out_file=out_path))
+    tracker.record(headers, req.est_cost, req.label)
+    # Pass the real response headers, not the tracker's snapshot: the snapshot
+    # keys them with underscores (x_requests_remaining), while manifest_entry
+    # reads the hyphenated header names -- so every manifest entry previously
+    # recorded null quota numbers.
+    append_manifest(manifest_entry(req, url=url, api_key=api_key, cost_credits=req.est_cost, headers=headers, out_file=out_path))
     return out_path
 
 
+def single_market_probe_request(cfg: dict, snapshot_dates: dict[int, str], market: str) -> PlannedRequest | None:
+    """One candidate futures market, probed on its own -- see run_verify_futures."""
+    season = cfg["props_era_start"]
+    if season not in snapshot_dates:
+        return None
+    return _historical_odds_request(
+        cfg,
+        label=f"verify-futures market={market}",
+        season=season,
+        snapshot=snapshot_dates[season],
+        markets=[market],
+        file_stub_market=f"futures_probe_{market}",
+    )
+
+
 def run_verify_futures(cfg: dict) -> list[str]:
+    """Probe every candidate futures market in its OWN request.
+
+    The original implementation sent all candidates as one comma-joined
+    ``markets`` parameter. The API rejects the *entire* request with 422 if
+    any single key is invalid, so that batch probe could not distinguish
+    "no season-long futures markets exist" from "one bogus key poisoned an
+    otherwise valid batch" -- it failed closed and reported nothing. One
+    request per market makes each key's verdict independent: a 422 is
+    tolerated and recorded as "key does not exist" (the API does not bill
+    rejected requests) rather than aborting the run.
+
+    Costs at most ``10 x len(candidates)`` credits, and in practice far less,
+    since only markets that actually return data are billed.
+    """
     snapshot_dates = snapshot_dates_for_seasons(cfg["snapshot_seasons"])
-    req = verify_futures_request(cfg, snapshot_dates)
-    if req is None:
-        raise SystemExit(f"no schedules data for props_era_start={cfg['props_era_start']}; cannot derive a snapshot date")
-
+    candidates = list(cfg["candidate_futures_markets"])
     tracker = CreditTracker(budget=cfg["credit_budget"])
-    out_path = execute_request(cfg, req, tracker)
 
-    payload = json.loads(out_path.read_text())
-    found = _market_keys_present(payload)
-    candidates = set(cfg["candidate_futures_markets"])
-    hits = sorted(found & candidates)
-    misses = sorted(candidates - found)
-    print(f"\nverify-futures | snapshot={req.snapshot} | candidates probed={len(candidates)}")
+    hits: list[str] = []
+    absent: list[str] = []
+    empty: list[str] = []
+    errored: list[tuple[str, int]] = []
+
+    for market in candidates:
+        req = single_market_probe_request(cfg, snapshot_dates, market)
+        if req is None:
+            raise SystemExit(
+                f"no schedules data for props_era_start={cfg['props_era_start']}; cannot derive a snapshot date"
+            )
+        try:
+            out_path = execute_request(cfg, req, tracker, tolerate_statuses=(422,))
+        except OddsAPIError as exc:
+            errored.append((market, exc.status_code))
+            print(f"  -> {market}: HTTP {exc.status_code} -- {exc.body_snippet}")
+            continue
+
+        if out_path is None:
+            absent.append(market)
+            print(f"  -> {market}: rejected (422) -- market key does not exist")
+            continue
+
+        payload = json.loads(out_path.read_text())
+        if market in _market_keys_present(payload):
+            hits.append(market)
+            print(f"  -> {market}: EXISTS and returned data")
+        else:
+            empty.append(market)
+            print(f"  -> {market}: accepted but returned no data at this snapshot")
+
+    print(f"\nverify-futures | snapshot season={cfg['props_era_start']} | candidates probed={len(candidates)}")
     print(f"  FOUND (season-long futures keys that exist): {hits if hits else 'none'}")
-    print(f"  not found: {misses}")
+    print(f"  rejected as invalid keys: {absent}")
+    print(f"  valid but empty at this snapshot: {empty}")
+    if errored:
+        print(f"  errored (NOT a verdict on the key): {errored}")
+    print(
+        f"  quota | x-requests-remaining={tracker.remaining_from_api} "
+        f"x-requests-used={tracker.used_from_api} | projected spend this run={tracker.spent_est}"
+    )
     return hits
 
 
@@ -564,6 +765,66 @@ def run_pull_team(cfg: dict) -> list[Path]:
         paths.append(execute_request(cfg, req, tracker))
     print(f"\npull-team done | {len(paths)} snapshot(s) written to {RAW_DIR}")
     return paths
+
+
+def run_probe_props(cfg: dict) -> dict:
+    """Measure the event-props path with ONE event before committing to the full pull.
+
+    One events lookup (1 credit) + one Week-1 event's props call (worst case
+    ``10 x len(event_prop_markets)``). Reports which prop markets actually
+    carry historical data at the earliest props-era snapshot, the *billed*
+    cost of the single event (measured from the x-requests-used delta -- the
+    account's own ledger, not an estimate), and an exact extrapolation for
+    the full 3-season pull.
+    """
+    season = cfg["props_era_start"]
+    snapshot_dates = snapshot_dates_for_seasons(cfg["snapshot_seasons"])
+    snapshot = snapshot_dates[season]
+    tracker = CreditTracker(budget=cfg["credit_budget"])
+
+    ev_path = execute_request(cfg, historical_events_request(cfg, season, snapshot), tracker)
+    events = week1_events(cfg, season, json.loads(ev_path.read_text()))
+    if not events:
+        raise SystemExit(f"probe-props: events lookup returned no Week-1 events for {season}")
+    print(f"probe-props | season={season} | Week-1 events found: {len(events)}")
+
+    used_before = tracker.used_from_api
+    target = sorted(events, key=lambda e: e.get("commence_time", ""))[0]
+    out_path = execute_request(cfg, event_props_request(cfg, season, snapshot, target), tracker)
+    used_after = tracker.used_from_api
+
+    billed = (used_after - used_before) if (used_before is not None and used_after is not None) else None
+    payload = json.loads(out_path.read_text())
+    # Event-odds responses nest the event under "data" as a single object.
+    ev_data = payload.get("data", {})
+    present = set()
+    for bk in ev_data.get("bookmakers", []):
+        for mk in bk.get("markets", []):
+            if "key" in mk:
+                present.add(mk["key"])
+    requested = set(cfg["event_prop_markets"])
+
+    n_events = len(events)
+    seasons = props_era_seasons(cfg)
+    extrapolated = None if billed is None else billed * n_events * len(seasons) + len(seasons)
+    print(f"\nprobe-props | event: {target.get('away_team')} @ {target.get('home_team')}")
+    print(f"  prop markets WITH historical data: {sorted(present & requested)}")
+    print(f"  requested but no data: {sorted(requested - present)}")
+    print(f"  billed for this one event (x-requests-used delta): {billed} credits")
+    print(
+        f"  extrapolation: {billed} x {n_events} Week-1 events x {len(seasons)} seasons "
+        f"+ {len(seasons)} events-lookups = ~{extrapolated} credits for the full pull"
+    )
+    print(
+        f"  quota | x-requests-remaining={tracker.remaining_from_api} "
+        f"x-requests-used={tracker.used_from_api}"
+    )
+    return {
+        "billed_per_event": billed,
+        "n_week1_events": n_events,
+        "markets_present": sorted(present & requested),
+        "extrapolated_full_pull": extrapolated,
+    }
 
 
 def run_pull_props(cfg: dict, *, allow_expensive: bool) -> list[Path]:
@@ -594,11 +855,29 @@ def run_pull_props(cfg: dict, *, allow_expensive: bool) -> list[Path]:
             f"pull-props | no season-long futures key found -- falling back to the expensive "
             f"Week-1 event-level props path (~{EXPENSIVE_PROPS_ESTIMATE} credits, --allow-expensive was passed)"
         )
-        reqs = expensive_props_requests(cfg, snapshot_dates)
+        paths: list[Path] = []
+        for season in props_era_seasons(cfg):
+            if season not in snapshot_dates:
+                continue
+            snapshot = snapshot_dates[season]
+            ev_path = execute_request(cfg, historical_events_request(cfg, season, snapshot), tracker)
+            events = sorted(
+                week1_events(cfg, season, json.loads(ev_path.read_text())),
+                key=lambda e: e.get("commence_time", ""),
+            )
+            print(f"pull-props | season={season}: {len(events)} Week-1 events")
+            for event in events:
+                out = execute_request(cfg, event_props_request(cfg, season, snapshot, event), tracker)
+                if out is not None:
+                    paths.append(out)
+        print(f"\npull-props done | {len(paths)} file(s) written to {RAW_DIR}")
+        return paths
 
     paths = []
     for req in reqs:
-        paths.append(execute_request(cfg, req, tracker))
+        out = execute_request(cfg, req, tracker)
+        if out is not None:
+            paths.append(out)
     print(f"\npull-props done | {len(paths)} file(s) written to {RAW_DIR}")
     return paths
 
@@ -677,7 +956,10 @@ def normalize_raw_dir(raw_dir: Path = RAW_DIR) -> pl.DataFrame:
         return pl.DataFrame(schema=_TEAM_LINES_SCHEMA)
 
     for path in sorted(raw_dir.glob("*.json")):
-        if "futures_probe" in path.stem or "week1_props" in path.stem:
+        # Team-lines files only: skip futures probes, per-event props files,
+        # and events-lookup files (whose "data" is a bare event list with no
+        # bookmakers -- normalize_raw_event would emit all-null odds rows).
+        if "futures_probe" in path.stem or "week1_props" in path.stem or "_events_" in path.stem:
             continue
         try:
             payload = json.loads(path.read_text())
@@ -734,6 +1016,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--verify-futures", action="store_true", help="ONE historical call probing season-long futures keys (~10 credits)")
     ap.add_argument("--pull-team", action="store_true", help="featured markets, 6 preseason snapshots (~180 credits)")
     ap.add_argument("--pull-props", action="store_true", help="props-era snapshots (cheap if verify-futures found a key, else needs --allow-expensive)")
+    ap.add_argument("--probe-props", action="store_true", help="ONE events lookup + ONE Week-1 event's props: measure real per-event cost before --pull-props")
     ap.add_argument("--allow-expensive", action="store_true", help="permit --pull-props' expensive Week-1 event-props fallback")
     ap.add_argument("--normalize", action="store_true", help="parse raw/*.json -> team_lines.parquet, no network, no key")
     args = ap.parse_args(argv)
@@ -751,6 +1034,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.verify_futures:
         run_verify_futures(cfg)
+        ran_anything = True
+
+    if args.probe_props:
+        run_probe_props(cfg)
         ran_anything = True
 
     if args.pull_team:

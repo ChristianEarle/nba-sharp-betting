@@ -54,6 +54,30 @@ snapshot_seasons: [2020, 2021, 2022, 2023, 2024, 2025]
 # plus two known-shaped team futures markets kept in for comparison.
 # --verify-futures is the actual source of truth for which of these exist;
 # nothing here is asserted true until that call runs and reports back.
+# Per-game player-prop market keys for the Week-1 event-level fallback
+# (--pull-props with no season-long futures market, --probe-props). All eight
+# are documented live NFL player-prop keys; historical availability at a given
+# snapshot is what --probe-props measures. The API bills only for markets that
+# actually return data, so listing a market with no historical coverage costs
+# nothing.
+# Scoped 2026-08-17 (option A of the budget discussion): the full 8-market
+# pull measured 70 credits/event via --probe-props, extrapolating to ~3,153 --
+# over the 3,000-credit cap. Dropped player_rush_attempts (collinear with
+# player_rush_yds -- both priced off the same volume expectation) and
+# player_pass_interceptions (no relationship to PPR breakout probability).
+# player_anytime_td is also out, on budget-bound grounds rather than merit: it
+# returned no data at the 2023 probe snapshot (absent markets bill nothing),
+# but if later snapshots DO carry it each event's cost rises 10 credits, and
+# the worst-case total must stay provably under the session's remaining
+# headroom -- the credit_budget below is per-invocation and knows nothing
+# about credits already spent by earlier subcommands.
+event_prop_markets:
+  - player_pass_yds
+  - player_pass_tds
+  - player_rush_yds
+  - player_reception_yds
+  - player_receptions
+
 candidate_futures_markets:
   - player_pass_yds_season
   - player_pass_tds_season

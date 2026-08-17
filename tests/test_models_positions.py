@@ -124,12 +124,18 @@ def test_adp_baseline_top10_is_earliest_expectation_ranks(pos: str) -> None:
 
 
 @pytest.fixture(scope="module", params=_POSITIONS)
-def tiny_result(request):
+def tiny_result(request, tmp_path_factory):
     pos = request.param
     _skip_if_data_missing(pos)
     cfg = _LOAD_CONFIG[pos]()
     trials = cfg["optuna"]["tiny_trials"]
-    result = _RUN_PIPELINE[pos](cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42)
+    # output_root keeps this tiny run away from the PRODUCTION bundles under
+    # data/models/ — omitting it silently overwrites the shipped model with a
+    # 5-trial version (which happened; see run_full_pipeline's docstring).
+    out = tmp_path_factory.mktemp(f"tiny_{pos}_artifacts")
+    result = _RUN_PIPELINE[pos](
+        cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42, output_root=out
+    )
     return pos, result
 
 
@@ -232,12 +238,16 @@ def test_fold_boundary_respected_in_tiny_run(tiny_result) -> None:
 
 
 @pytest.mark.parametrize("pos", _POSITIONS)
-def test_determinism_two_runs_identical_holdout_predictions(pos: str) -> None:
+def test_determinism_two_runs_identical_holdout_predictions(pos: str, tmp_path) -> None:
     _skip_if_data_missing(pos)
     cfg = _LOAD_CONFIG[pos]()
     trials = cfg["optuna"]["tiny_trials"]
-    r1 = _RUN_PIPELINE[pos](cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42)
-    r2 = _RUN_PIPELINE[pos](cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42)
+    r1 = _RUN_PIPELINE[pos](
+        cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42, output_root=tmp_path / "a"
+    )
+    r2 = _RUN_PIPELINE[pos](
+        cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42, output_root=tmp_path / "b"
+    )
 
     p1 = r1["holdout_preds"].sort_values(["season", "gsis_id"])["pred_calibrated"].to_numpy()
     p2 = r2["holdout_preds"].sort_values(["season", "gsis_id"])["pred_calibrated"].to_numpy()

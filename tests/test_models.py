@@ -120,11 +120,18 @@ def test_baselines_return_series_aligned_to_input() -> None:
 
 
 @pytest.fixture(scope="module")
-def tiny_result():
+def tiny_result(tmp_path_factory):
     _skip_if_data_missing()
     cfg = load_config()
     trials = cfg["optuna"]["tiny_trials"]
-    return run_full_pipeline(cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42)
+    # output_root is mandatory hygiene here: without it this tiny run would
+    # overwrite the PRODUCTION bundle/report/metrics under data/models/ and
+    # outputs/ with a 5-trial version — which happened, silently, before the
+    # parameter existed. See run_full_pipeline's docstring.
+    out = tmp_path_factory.mktemp("tiny_wr_artifacts")
+    return run_full_pipeline(
+        cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42, output_root=out
+    )
 
 
 def test_calibration_output_in_unit_interval_no_nan(tiny_result) -> None:
@@ -146,12 +153,16 @@ def test_calibration_method_is_isotonic_or_platt(tiny_result) -> None:
     assert tiny_result["calib_method"] in ("isotonic", "platt")
 
 
-def test_determinism_two_runs_identical_holdout_predictions() -> None:
+def test_determinism_two_runs_identical_holdout_predictions(tmp_path) -> None:
     _skip_if_data_missing()
     cfg = load_config()
     trials = cfg["optuna"]["tiny_trials"]
-    r1 = run_full_pipeline(cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42)
-    r2 = run_full_pipeline(cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42)
+    r1 = run_full_pipeline(
+        cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42, output_root=tmp_path / "a"
+    )
+    r2 = run_full_pipeline(
+        cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42, output_root=tmp_path / "b"
+    )
 
     p1 = r1["holdout_preds"].sort_values(["season", "gsis_id"])["pred_calibrated"].to_numpy()
     p2 = r2["holdout_preds"].sort_values(["season", "gsis_id"])["pred_calibrated"].to_numpy()
@@ -161,3 +172,32 @@ def test_determinism_two_runs_identical_holdout_predictions() -> None:
     assert r1["calib_method"] == r2["calib_method"]
     assert r1["frozen"]["lgbm_params"] == r2["frozen"]["lgbm_params"]
     assert r1["frozen"]["xgb_params"] == r2["frozen"]["xgb_params"]
+
+
+def test_tiny_run_never_touches_production_artifacts(tmp_path) -> None:
+    """The clobbering guard.
+
+    Before ``output_root`` existed, this exact tiny run overwrote the shipped
+    bundle under data/models/ (and its report/metrics) with a 5-trial version
+    every time the suite ran -- the board silently degraded and metrics files
+    described a model that no longer existed on disk. Lock the fix: a redirected
+    run must leave every production artifact byte-identical.
+    """
+    _skip_if_data_missing()
+    from src.models import train as _train
+
+    spec = _train.position_spec("wr")
+    prod_paths = [spec.artifact_path, spec.report_path, spec.metrics_json_path]
+    before = {p: (p.stat().st_mtime_ns, p.stat().st_size) for p in prod_paths if p.exists()}
+    if not before:
+        pytest.skip("no production artifacts present to protect")
+
+    cfg = load_config()
+    trials = cfg["optuna"]["tiny_trials"]
+    run_full_pipeline(
+        cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42, output_root=tmp_path
+    )
+
+    after = {p: (p.stat().st_mtime_ns, p.stat().st_size) for p in prod_paths if p.exists()}
+    assert before == after, "tiny run modified production artifacts"
+    assert (tmp_path / spec.artifact_path.name).exists(), "redirected bundle missing"

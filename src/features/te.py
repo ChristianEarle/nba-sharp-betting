@@ -92,6 +92,7 @@ _OUT_COLUMNS = (
     + ["team_pass_att_pg_prior", "team_plays_pg_prior", "team_pass_rate_prior"]
     + ["vacated_target_share", "vacated_carry_share", "competition_draft_capital"]
     + ["label_season_2020"]
+    + ["implied_ppg", "implied_win_prob", "has_vegas"]
     + [f"{m}_n1" for m in BASE_METRICS]
     + [f"{m}_yoy_delta" for m in BASE_METRICS]
 )
@@ -115,6 +116,7 @@ def build_features_te(
     ngs_receiving: pl.DataFrame | None = None,
     coaching_changes: pl.DataFrame | None = None,
     pbp: pl.DataFrame | None = None,
+    vegas_team: pl.DataFrame | None = None,
     scoring_profile: dict | None = None,
 ) -> pl.DataFrame:
     """Build the TE feature table from already-loaded frames.
@@ -154,6 +156,7 @@ def build_features_te(
     out = out.join(sh.team_pass_volume_prior(reg), on=["season", "team"], how="left")
     out = out.join(sh.vacated_shares(reg, season_team), on=["season", "team"], how="left")
     out = out.join(sh.competition_draft_capital(draft_picks, POSITION), on=["season", "team"], how="left")
+    out = sh.attach_vegas_team(out, vegas_team)
 
     out = out.with_columns(pl.min_horizontal(pl.col("years_exp"), pl.lit(10)).alias("year_in_league"))
     out = sh.add_covid_flag(out)
@@ -179,6 +182,7 @@ def load_and_build(
     ngs_receiving_path: Path = NGS_RECEIVING_PATH,
     coaching_changes_path: Path = sh.PATHS["coaching_changes"],
     pbp_path: Path = RAW_DIR / "pbp.parquet",
+    vegas_team_path: Path = PROCESSED_DIR / "vegas_team.parquet",
     out_path: Path = OUT_PATH,
 ) -> pl.DataFrame:
     """Load every default source from disk and build + write features_te.parquet."""
@@ -193,6 +197,7 @@ def load_and_build(
     ngs_receiving = pl.read_parquet(ngs_receiving_path) if ngs_receiving_path.exists() else None
     coaching_changes = sh.load_coaching_changes(coaching_changes_path)
     pbp = pl.read_parquet(pbp_path) if pbp_path.exists() else None
+    vegas_team = pl.read_parquet(vegas_team_path) if vegas_team_path.exists() else None
 
     out = build_features_te(
         labels=labels,
@@ -206,6 +211,7 @@ def load_and_build(
         ngs_receiving=ngs_receiving,
         coaching_changes=coaching_changes,
         pbp=pbp,
+        vegas_team=vegas_team,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.write_parquet(out_path)

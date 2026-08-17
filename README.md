@@ -406,6 +406,15 @@ read from the shipped `fantasy_points_ppr` column. See
       `pbp` entry (9-column slim pull), `src.features.shared.redzone_share_table`,
       full from-scratch Optuna retrain of all four positions — see "v1.5:
       pbp red-zone features + retrain" below
+- [x] **v1.5 D (Phase C) — Vegas team/prop features + promotion gate**:
+      `src.ingest.vegas` (real local pull, 2020–2025), `implied_ppg`/
+      `implied_win_prob`/`has_vegas` wired into every position's feature
+      matrix (nullable, `src.features.shared.attach_vegas_team`), an
+      overlay backtest (`src.models.overlay_backtest`), and the binding
+      promotion experiment (`src.models.vegas_experiment`) — **all four
+      positions rejected**, so the Vegas columns stay in the matrix but
+      excluded from every position's trees — see "v1.5 Phase C: Vegas
+      team/prop features" below
 
 ## v1.5 Odds API (local run required)
 
@@ -466,6 +475,100 @@ so the raw JSON is a real cross-machine contract: pull it locally once,
 commit it, and this environment (or any other) can `--normalize` and use
 it without ever touching the network itself.
 
+### Local run results (actual)
+
+The local pull has since happened; `data/external/odds_api/` now carries
+real 2020–2025 data, git-tracked per the negation above. Verified
+directly against `data/external/odds_api/manifest.json` (the module's own
+authoritative cost ledger) rather than estimated: **2,514 credits total**
+— 180 for `--pull-team` (6 snapshots), 4 for 4 events-lookups, and 2,330
+for 46 Week-1 event-props calls (`--pull-props --allow-expensive`, the
+expensive per-event fallback — the manifest carries no
+`--verify-futures`-labeled entries at all, so whether a season-long
+futures market was probed and rejected, or the run skipped straight to
+`--pull-props --allow-expensive`, isn't determinable from the artifacts
+on disk: `execute_request`'s tolerated-422 path returns before writing
+either a raw file or a manifest entry, so an all-422 futures probe would
+leave the identical zero-trace footprint as never running one at all —
+worth tightening if that distinction ever matters). See "v1.5 Phase C:
+Vegas team/prop features" below for what was built from this data.
+
+## v1.5 Phase C: Vegas team/prop features
+
+Two derived tables (`src.ingest.vegas`, `python -m src.ingest.vegas`),
+built from the local pull above:
+
+- **`data/processed/vegas_team.parquet`** — per (season, team):
+  market-implied points-per-game (from `total`/`home_spread`) and a
+  de-vigged moneyline win probability, averaged across every event
+  `team_lines.parquet` priced for that team that season. Coverage (every
+  team_lines-listed team counts, `has_vegas` is always 1 in this table —
+  see its docstring for why):
+
+  | Season | Teams priced | Avg. priced events / team |
+  |---|---|---|
+  | 2020 | 32 | 2.0 |
+  | 2021 | 32 | 2.3 |
+  | 2022 | 32 | 2.7 |
+  | 2023 | 32 | 1.7 |
+  | 2024 | 32 | 17.0 |
+  | 2025 | 32 | 16.4 |
+
+  All 32 teams are listed every season 2020–2025 (books priced at least
+  one game per team even 4+ days out); 2020–2023 only got a handful of
+  early-marquee games this far ahead of kickoff (books "didn't hang
+  full-season lines 4 days out" those years), while 2024–2025 are close
+  to the full 17-game slate.
+- **`data/processed/vegas_props.parquet`** — per (season, gsis_id): a
+  Week-1-only PPR-points rate proxy from the props raw JSON (median
+  betting line per market, scored through `configs/scoring.yaml`'s
+  `standard_ppr` weights), matched to `gsis_id` via
+  `src.ingest.id_map.match_to_gsis` off a market-composition position
+  guess (the props JSON carries no position column). Match rates:
+
+  | Season | Players | Matched | Rate |
+  |---|---|---|---|
+  | 2023 | 15 | 13 | 86.7% |
+  | 2024 | 131 | 130 | 99.2% |
+  | 2025 | 173 | 170 | 98.3% |
+
+  (2023 has only 1 of 15 Week-1 events with any bookmaker data at all —
+  the Thursday opener — matching the local pull's own coverage note.)
+
+**Overlay backtest** (`src.models.overlay_backtest`,
+`outputs/overlay_backtest.md`): does `probability * log1p(expectation_pos_rank)`
+(the board's own overlay formula) or a Vegas-weighted variant
+(`* clip(1 + z(implied_ppg), 0.5, 1.5)`) beat the model alone at ranking
+2023–2025 breakouts? **No consistent winner** — model-only wins outright
+at WR and TE, the Vegas variant wins at RB, all three tie at QB on
+top-10 precision — and every position's pooled holdout-era positive
+count (5–10) is well under what's needed to call any of these deltas a
+real edge rather than noise; see that report for the full per-season +
+pooled tables and the explicit small-sample caveat on every verdict line.
+
+**Promotion gate** (`src.models.vegas_experiment`,
+`outputs/vegas_experiment.md`): per position, reuse every v1.5-frozen
+hyperparameter/blend-weight (no new Optuna anywhere), add
+`implied_ppg`/`implied_win_prob`/`has_vegas` to the tree heads only
+(the logistic head's curated subset stays low-null by design — see that
+module's docstring), and compare pooled 2024+2025 holdout top-10
+precision against the v1.5-only baseline. **All four positions
+rejected** (WR/RB/TE/QB: tie or regression, never an improvement) — per
+the binding rule, none were promoted. Mechanically, rejection means
+`configs/model_{pos}.yaml`'s `excluded_features: [implied_ppg,
+implied_win_prob, has_vegas]` stays populated for every position, which
+`src.models.train.tree_feature_columns` reads to keep those three
+columns out of that position's LGBM/XGB feature set — the columns
+remain in every `features_{pos}.parquet` as nullable, just unused by any
+currently-deployed model. Had any position promoted instead,
+`src.models.vegas_experiment.promote_position` regenerates that
+position's bundle (frozen hyperparameters, real OOF-recomputed
+calibration, one holdout re-eval — no new Optuna) and clears that
+position's `excluded_features`; the 2026 board would then need
+`vegas_team` wired into `board_2026.load_raw_frames`, which is a
+mechanical follow-up (see `outputs/vegas_experiment.md`'s summary) never
+exercised here since nothing promoted.
+
 ## Known Limitations
 
 - **Roughly 4–5k usable training rows** are expected across the whole
@@ -477,13 +580,31 @@ it without ever touching the network itself.
   use the player's own prior-season finish rank as `expectation_pos_rank`
   (`adp_source=proxy`) because no reachable ADP archive covers that far
   back in this environment — see "Market expectation" above.
-- **No Vegas data anywhere in training.** The brief scopes Vegas/odds data
-  to the overlay only (`data/external/vegas_implied_2026.csv`, optional,
-  manual, presentation-layer). v1.5 built the ingest (`src/ingest/odds_api.py`)
-  but it is code-complete, not executed — see "v1.5 Odds API (local run
-  required)" above — this environment's egress proxy blocks
-  `api.the-odds-api.com` outright, a paid API this environment can't
-  reach regardless of the code being ready.
+- **Vegas features are acquired and measured — twice, independently — and
+  off by default: they don't help.** (Retires v1.5's "No Vegas data
+  anywhere in training" entry.) The Odds API acquisition ran locally
+  2026-08-17: preseason team lines 2020–2025 plus Week-1 player props are
+  checked in under `data/external/odds_api/` (2,514 credits by the
+  manifest's ledger — the data commit's 1,704 figure undercounted). Two
+  separate evaluations then reached the same verdict:
+  `src.models.vegas_experiment` (frozen v1.5 hyperparameters, one holdout
+  eval per position under the brief's binding promotion rule: all four
+  positions rejected — tie or regression on holdout top-10 precision,
+  never an improvement) and `src/models/ablation_vegas.py` (independent
+  fixed-hyperparameter LGBM A/B authored in a separate local session:
+  no reliable lift anywhere, QB consistently mildly negative, holdout
+  PR-AUC −0.09/−0.13). Shared interpretation: `expectation_pos_rank`
+  (ADP/ECR is itself a market) already prices the Vegas signal, and
+  2020+ coverage leaves early folds learning from nulls. The columns
+  remain in every `features_{pos}.parquet` (nullable;
+  `src.ingest.vegas` + `src/features/vegas.py`), excluded from every
+  deployed model via `configs/model_{pos}.yaml`'s `excluded_features`
+  and absent from the default `make retrain`. Week-1 props (2024–2025
+  plus one 2023 game, measured) sit entirely inside the holdout years —
+  zero trainable rows; raw JSON retained for when future seasons make
+  them trainable. The 2026 board's manual
+  `data/external/vegas_implied_2026.csv` overlay hook (presentation
+  only) is unaffected.
 - **The rookie model is a heuristic, not a Phase-4-grade model.** A single
   shallow L2 logistic on draft capital + combine + landing-team context,
   time-split sanity-checked (not tuned) on ~450–550 historical rookie
@@ -533,3 +654,56 @@ it without ever touching the network itself.
   "v1.5: pbp red-zone features + retrain" above); a null rate of
   ~18-26% on the 2026 population (players with no qualifying 2025
   red-zone usage, or no 2025 games at all) is expected, not a bug.
+- **Calibrated vs. raw-blend metrics are not interchangeable — compare
+  like with like.** `outputs/model_{pos}_report.md` scores "the model"
+  off the frozen isotonic/Platt `pred_calibrated` column;
+  `outputs/overlay_backtest.md` and `outputs/vegas_experiment.md` score
+  off the raw pre-calibration blend (`pred_blend`/`pred_blend_raw`) —
+  deliberately, for `vegas_experiment.py`'s apples-to-apples comparison
+  between two variants that never differ in calibration. These are NOT
+  generally the same number even for the identical fitted models:
+  isotonic regression is only *non-decreasing*, not *strictly*
+  increasing, and its flat (tied) blocks can shift both PR-AUC and
+  top-10 precision away from the raw score's value. Verified directly on
+  this build's WR bundle — byte-identical underlying predictions
+  (`pred_blend_raw` vs. `vegas_experiment.score_baseline`'s output,
+  `max abs diff == 0.0`), yet PR-AUC 0.133 (raw) vs. 0.104 (calibrated)
+  and top-10 precision 0.200 (raw) vs. 0.000 (calibrated). Treat a
+  cross-file number mismatch as this — not as evidence of a different
+  model generation — unless you've confirmed both sides used the same
+  score column.
+- **The training pipeline's own "two calls -> identical holdout
+  predictions" determinism guarantee did not hold across separate
+  process invocations during this review, despite a fixed seed,
+  identical config, and identical data.** Re-running
+  `run_full_pipeline` for WR three times in immediate succession
+  produced three different Optuna-selected hyperparameter sets (e.g.
+  blend weights `{lgbm: 0.1, xgb: 0.9}` vs. `{lgbm: 0.2, xgb: 0.8}`,
+  `n_estimators` 246 vs. 488) — the root cause wasn't isolated (most
+  likely BLAS/OpenMP thread-count-sensitive floating point somewhere in
+  the tuning loop, since `n_jobs=1`/`deterministic=True` only pin the
+  GBM libraries' own parallelism, not every linear-algebra call
+  upstream of them). **This is a real, verified finding, not the
+  "excluded-but-present Vegas columns perturb column order" mechanism
+  once suspected** — disproved directly: `tree_feature_columns`' cfg
+  exclusion filters a fixed-order column list, so Optuna sees an
+  identical, identically-ordered feature matrix whether or not
+  `implied_ppg`/`implied_win_prob`/`has_vegas` exist elsewhere in the
+  wider dataframe; three retrains with those columns present-but-excluded
+  the entire time still diverged from each other. What *did* stay
+  stable across all three WR retrains, empirically (not guaranteed at a
+  different sample size): the final rounded holdout PR-AUC/top-10
+  precision in `outputs/model_{pos}_report.md` (0.104 / 0.000 all three
+  times, at ~250 holdout rows / 7 positives) — while `overlay_backtest.md`
+  and `vegas_experiment.md`'s own scores (which lean more on the
+  OOF-validation-fold predictions and the raw blend) did shift between
+  runs. Practical guidance: regenerate `data/models/*.joblib`,
+  `outputs/model_*_{report.md,metrics.json}`, `outputs/overlay_backtest.md`,
+  `outputs/vegas_experiment.md`, and `outputs/breakout_board_2026.*`
+  together, from the same retrain pass, never independently; treat a
+  cross-regeneration PR-AUC delta under roughly 0.03 or a one-hit
+  top-10 swing as generation noise rather than a real improvement or
+  regression, on either side of a comparison. This needs real
+  root-causing (candidate: pin `OMP_NUM_THREADS=1`/`OPENBLAS_NUM_THREADS=1`
+  and re-verify) — flagged here, not fixed, since it's outside this
+  pass's requested scope.

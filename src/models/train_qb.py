@@ -37,9 +37,15 @@ def run_full_pipeline(
     classifier_trials: int | None = None,
     regression_trials: int | None = None,
     seed: int | None = None,
+    output_root=None,
 ) -> dict:
     return train.run_full_pipeline(
-        SPEC, cfg=cfg, classifier_trials=classifier_trials, regression_trials=regression_trials, seed=seed
+        SPEC,
+        cfg=cfg,
+        classifier_trials=classifier_trials,
+        regression_trials=regression_trials,
+        seed=seed,
+        output_root=output_root,
     )
 
 
