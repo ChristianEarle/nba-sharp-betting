@@ -1,4 +1,6 @@
-data/
+data/*
+!data/external/
+data/external/adp/*.csv
 outputs/
 __pycache__/
 *.pyc

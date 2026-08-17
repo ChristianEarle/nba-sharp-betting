@@ -69,6 +69,17 @@ def _read_csv_url(url: str) -> pl.DataFrame:
     )
 
 
+def _read_parquet_url(url: str) -> pl.DataFrame:
+    """Fetch a parquet file over HTTP into polars, honouring the environment's proxy."""
+    import io
+
+    import requests
+
+    resp = requests.get(url, timeout=180)
+    resp.raise_for_status()
+    return pl.read_parquet(io.BytesIO(resp.content))
+
+
 def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     with open(path) as fh:
         return yaml.safe_load(fh)
@@ -128,13 +139,14 @@ def pull_dataset(
     try:
         df = loader(**kwargs)
     except Exception as exc:  # noqa: BLE001 - report, never silently substitute
-        url = spec.get("fallback_csv_url")
-        if not url:
+        csv_url = spec.get("fallback_csv_url")
+        parquet_url = spec.get("fallback_parquet_url")
+        if not csv_url and not parquet_url:
             return PullResult(
                 name, None, 0, 0, [], cached=False, error=f"{type(exc).__name__}: {exc}"
             )
         try:
-            df = _read_csv_url(url)
+            df = _read_parquet_url(parquet_url) if parquet_url else _read_csv_url(csv_url)
             fallback_used = True
         except Exception as exc2:  # noqa: BLE001
             return PullResult(

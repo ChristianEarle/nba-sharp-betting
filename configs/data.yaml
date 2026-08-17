@@ -91,3 +91,16 @@ datasets:
     seasonal: true
     first_available: 2022
     required: false
+  ff_ecr:
+    loader: load_ff_rankings
+    seasonal: false
+    required: true
+    kwargs:
+      type: all
+    # nflreadpy hardcodes the github.com/<org>/<repo>/raw/... form of this URL,
+    # which this environment's egress proxy rejects with 403. The canonical
+    # raw.githubusercontent.com host serves the identical file. Same source,
+    # same commit — only the host differs. File is large (~39MB, 1.8M rows);
+    # in this environment the loader call itself fails and we always land on
+    # the fallback.
+    fallback_parquet_url: https://raw.githubusercontent.com/dynastyprocess/data/master/files/db_fpecr.parquet
