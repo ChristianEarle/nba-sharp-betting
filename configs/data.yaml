@@ -1,29 +1,50 @@
 # Data acquisition config (Phase 1a).
 # Seasons are inclusive. 2013 start gives us 2014+ as usable training rows
 # once year-over-year deltas require a prior season.
+# end=2026 (Phase 6): the 2026 season has not kicked off yet (current offseason
+# roster == preseason roster). rosters/schedules/draft_picks/combine/players/
+# ff_playerids already carry real 2026 rows; player_stats/snap_counts/
+# depth_charts/ff_opportunity/ngs_*/ftn_charting will stay empty for 2026
+# until Week 1 is played -- see README's "Known data issues".
 seasons:
   start: 2013
-  end: 2025
+  end: 2026
 
 # Datasets pulled from nflverse via nflreadpy.
 # first_available documents when the source actually begins; pulls are clipped
-# to it so we don't request seasons that cannot exist.
+# to it so we don't request seasons that cannot exist. last_available caps the
+# other end the same way: a dataset that only has games-played data (weekly
+# stats, snaps, depth charts, NGS, FTN, ff_opportunity) genuinely has nothing
+# for a season before its Week 1 is played, and unlike a normal "zero rows,
+# no error" gap (2025 depth_charts), requesting 2026 from these specific
+# loaders either raises (player_stats: 404 on a release file that doesn't
+# exist yet; snap_counts: nflreadpy hard-validates "season must be <= 2025")
+# or silently returns a different, schema-incompatible "current state"
+# payload instead of a per-season snapshot (depth_charts: 12 cols/no season
+# column for [2026] vs. the normal 26-col/season-keyed historical shape) --
+# verified directly against each loader before adding this cap. Set 5 lines
+# below the global seasons.end so this file's history stays self-documenting
+# once a season's real data starts flowing (just delete the cap for that one
+# dataset; nothing else needs to change).
 # required=false means the pipeline must run with this dataset absent/null.
 datasets:
   player_stats:
     loader: load_player_stats
     seasonal: true
     first_available: 1999
+    last_available: 2025 # 2026 release file 404s -- season not played yet
     required: true
   snap_counts:
     loader: load_snap_counts
     seasonal: true
     first_available: 2012
+    last_available: 2025 # nflreadpy raises ValueError for season > 2025
     required: true
   depth_charts:
     loader: load_depth_charts
     seasonal: true
     first_available: 2001
+    last_available: 2024 # 2025 returns 0 rows; 2026 returns a different, non-seasonal schema (see above)
     required: true
   rosters:
     loader: load_rosters
@@ -34,6 +55,17 @@ datasets:
     loader: load_schedules
     seasonal: true
     first_available: 1999
+    required: true
+  # Weekly rosters exist to answer one question the season-level rosters
+  # cannot: who was on the team at Week 1, BEFORE any in-season trades. The
+  # season-level table reflects the player's final team, which is future
+  # information relative to preseason prediction (e.g. Davante Adams 2024
+  # reads NYJ, his October trade destination).
+  rosters_weekly:
+    loader: load_rosters_weekly
+    seasonal: true
+    first_available: 2002
+    last_available: 2025 # nflreadpy raises ValueError for season > 2025; no Week-1 has been played
     required: true
   draft_picks:
     loader: load_draft_picks
@@ -62,6 +94,7 @@ datasets:
     loader: load_ff_opportunity
     seasonal: true
     first_available: 2006
+    last_available: 2025 # weekly expected-points data; nothing exists for a season with no games played
     required: true
     kwargs:
       stat_type: weekly
@@ -69,6 +102,7 @@ datasets:
     loader: load_nextgen_stats
     seasonal: true
     first_available: 2016
+    last_available: 2025
     required: false
     kwargs:
       stat_type: passing
@@ -76,6 +110,7 @@ datasets:
     loader: load_nextgen_stats
     seasonal: true
     first_available: 2016
+    last_available: 2025
     required: false
     kwargs:
       stat_type: receiving
@@ -83,6 +118,7 @@ datasets:
     loader: load_nextgen_stats
     seasonal: true
     first_available: 2016
+    last_available: 2025
     required: false
     kwargs:
       stat_type: rushing
@@ -90,6 +126,7 @@ datasets:
     loader: load_ftn_charting
     seasonal: true
     first_available: 2022
+    last_available: 2025
     required: false
   ff_ecr:
     loader: load_ff_rankings

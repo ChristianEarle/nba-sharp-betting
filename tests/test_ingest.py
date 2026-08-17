@@ -81,9 +81,16 @@ def test_expected_columns_present(name: str, cols: list[str]) -> None:
 
 
 def test_player_stats_covers_all_configured_seasons() -> None:
+    """Every configured season must have player_stats rows, up through the dataset's own
+
+    ``last_available`` cap (configs/data.yaml) -- a season past that cap has no games
+    played yet by construction (see data.yaml's header), not a real gap.
+    """
     df = _read("player_stats")
     present = set(df.get_column("season").unique().to_list())
-    missing = [s for s in SEASONS if s not in present]
+    last_available = CFG["datasets"]["player_stats"].get("last_available")
+    expected = [s for s in SEASONS if last_available is None or s <= last_available]
+    missing = [s for s in expected if s not in present]
     assert not missing, f"player_stats missing seasons: {missing}"
 
 

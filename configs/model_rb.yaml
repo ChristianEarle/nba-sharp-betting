@@ -1,0 +1,91 @@
+# RB model config (Phase 4). src/models/train.py reads this (via the
+# thin src/models/train_rb.py wrapper) rather than hardcoding
+# hyperparameter search bounds / seeds / feature lists. Structure and
+# every non-feature-name value is a direct port of configs/model_wr.yaml
+# — only logistic_feature_subset is RB-specific (RB's opportunity metrics
+# are carries/targets-based, not WR's target-share-only family).
+
+seed: 42
+
+optuna:
+  classifier_trials: 60 # per model type (LGBM, XGB), on the 4 validation folds
+  regression_trials: 30 # per model type (LGBM, XGB) — fewer, per the brief
+  tiny_trials: 5 # used by tests/test_models_positions.py; keeps CI fast
+
+# Curated subset for the L2 logistic head. Deliberately small and
+# low-null — logistic regression has no native handling of missing
+# values or high-cardinality/high-null columns the way the tree models do.
+# expectation_pos_rank is legitimate: it is knowable before Week 1 (the
+# preseason market's own rank), not a leak.
+logistic_feature_subset:
+  - expectation_pos_rank
+  - age
+  - year_in_league
+  - log_draft_pick
+  - games_prior
+  - carry_share_n1
+  - weighted_opportunity_pg_n1
+  - target_share_n1
+  - ppr_ppg_n1
+  - rush_td_rate_n1
+  - efficiency_residual_pg_n1
+  - team_change
+  - new_hc
+  - vacated_carry_share
+  - backfield_committee_count_n1
+
+# adp_source is one-hot encoded (ecr / proxy / capped) for the logistic
+# head; ecr is the dropped baseline category (2020-2025, the real-market
+# era) so the two coefficients read as "proxy-era" / "capped" effects
+# relative to it. Identical across every position — adp_source lives on
+# labels.parquet, not the position feature table.
+adp_source_categories: [ecr, proxy, capped]
+adp_source_baseline: ecr
+
+# LGBM/XGB train on every numeric feature column in features_rb.parquet
+# (identifiers/labels excluded) — trees handle nulls and high cardinality
+# natively, no reason to restrict them to the logistic subset.
+
+search_space:
+  lgbm:
+    max_depth: [3, 5]
+    num_leaves: [7, 31]
+    min_child_samples: [30, 100] # deliberately high floor — guards against overfitting a smaller-than-WR pool
+    learning_rate: [0.01, 0.1]
+    n_estimators: [100, 600]
+    reg_alpha: [0.0, 5.0] # L1
+    reg_lambda: [0.0, 5.0] # L2
+    subsample: [0.6, 1.0]
+    colsample_bytree: [0.6, 1.0]
+  xgb:
+    max_depth: [3, 5]
+    min_child_weight: [5, 50] # XGB's analogue of min_child_samples
+    learning_rate: [0.01, 0.1]
+    n_estimators: [100, 600]
+    reg_alpha: [0.0, 5.0] # L1
+    reg_lambda: [0.0, 5.0] # L2
+    subsample: [0.6, 1.0]
+    colsample_bytree: [0.6, 1.0]
+  logistic:
+    # Small fixed grid (not Optuna — the brief scopes Optuna tuning to
+    # LGBM/XGB only), evaluated the same way: mean validation PR-AUC
+    # across the 4 folds.
+    C: [0.01, 0.03, 0.1, 0.3, 1.0, 3.0]
+
+blend:
+  grid_step: 0.1 # simplex step for the classifier-trio blend-weight grid search
+
+calibration:
+  method_search: [isotonic, platt] # isotonic first choice; falls back to platt if it hurts pooled val Brier
+
+# Age-adjusted-ADP baseline (Deliverable 3.3). Fixed constants, not
+# tuned — same constants as WR's config (the brief only says to adapt
+# these per position if the config already parameterizes them; there is
+# no RB-specific age/experience curve to justify a different bonus/
+# threshold, so they are kept identical).
+baselines:
+  age_adjusted_adp:
+    age_bonus: 15
+    age_threshold: 25 # bonus applies when age <= this
+    year_in_league_bonus: 10
+    year_in_league_eligible: [1, 2]

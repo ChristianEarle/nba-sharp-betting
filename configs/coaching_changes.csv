@@ -1,0 +1,104 @@
+# Offensive-coordinator / primary-play-caller changes by season (offseason only).
+#
+# Semantics:
+# - A row means: this team entered season S with a NEW offensive coordinator or
+#   a NEW primary play-caller (HC taking over play-calling counts).
+# - If a season appears anywhere in this file, unlisted teams that season are
+#   new_oc=0. Seasons entirely absent (currently 2014-2018) are new_oc=null.
+# - In-season changes are deliberately excluded: the feature must be knowable
+#   preseason (leakage rule).
+#
+# Provenance: seeded from model knowledge (cutoff Jan 2026) because this
+# environment's proxy blocks Wikipedia; there is no nflverse table for OC.
+# verified=0 on every row — VERIFY MANUALLY against a coaching-changes source
+# and flip to 1. Expect a handful of misses; the feature is nullable and
+# tree models tolerate noise here, but verification is ~5 min/season.
+# Team codes follow nflverse (LV from 2020, WAS, LAR, LAC).
+season,team,new_oc,oc_name,verified
+2019,GB,1,Matt LaFleur (HC-caller),0
+2019,ARI,1,Kliff Kingsbury (HC-caller),0
+2019,TB,1,Byron Leftwich,0
+2019,CLE,1,Todd Monken,0
+2019,CIN,1,Zac Taylor (HC-caller),0
+2019,NYJ,1,Adam Gase (HC-caller),0
+2019,DEN,1,Rich Scangarello,0
+2019,JAX,1,John DeFilippo,0
+2019,TEN,1,Arthur Smith,0
+2019,DET,1,Darrell Bevell,0
+2019,BAL,1,Greg Roman,0
+2019,ATL,1,Dirk Koetter,0
+2019,DAL,1,Kellen Moore,0
+2020,CAR,1,Joe Brady,0
+2020,CLE,1,Kevin Stefanski (HC-caller),0
+2020,NYG,1,Jason Garrett,0
+2020,WAS,1,Scott Turner,0
+2020,MIA,1,Chan Gailey,0
+2020,JAX,1,Jay Gruden,0
+2020,LAC,1,Shane Steichen,0
+2020,MIN,1,Gary Kubiak,0
+2020,DEN,1,Pat Shurmur,0
+2021,ATL,1,Dave Ragone (A.Smith HC-caller),0
+2021,DET,1,Anthony Lynn,0
+2021,NYJ,1,Mike LaFleur,0
+2021,PHI,1,Shane Steichen,0
+2021,JAX,1,Darrell Bevell,0
+2021,LAC,1,Joe Lombardi,0
+2021,SEA,1,Shane Waldron,0
+2021,TEN,1,Todd Downing,0
+2021,MIN,1,Klint Kubiak,0
+2021,PIT,1,Matt Canada,0
+2021,MIA,1,George Godsey / Eric Studesville,0
+2022,CHI,1,Luke Getsy,0
+2022,DEN,1,Nathaniel Hackett (HC-caller),0
+2022,MIA,1,Mike McDaniel (HC-caller),0
+2022,MIN,1,Kevin O'Connell (HC-caller),0
+2022,NYG,1,Mike Kafka,0
+2022,LV,1,Josh McDaniels (HC-caller),0
+2022,JAX,1,Doug Pederson (HC-caller),0
+2022,HOU,1,Pep Hamilton,0
+2022,NO,1,Pete Carmichael (caller post-Payton),0
+2022,NE,1,Matt Patricia (caller),0
+2022,CAR,1,Ben McAdoo,0
+2022,BUF,1,Ken Dorsey,0
+2022,DET,1,Ben Johnson,0
+2023,ARI,1,Drew Petzing,0
+2023,IND,1,Shane Steichen (HC-caller),0
+2023,DEN,1,Sean Payton (HC-caller),0
+2023,CAR,1,Thomas Brown,0
+2023,HOU,1,Bobby Slowik,0
+2023,NYJ,1,Nathaniel Hackett,0
+2023,TB,1,Dave Canales,0
+2023,LAC,1,Kellen Moore,0
+2023,DAL,1,Brian Schottenheimer (McCarthy caller),0
+2023,TEN,1,Tim Kelly,0
+2023,BAL,1,Todd Monken,0
+2023,WAS,1,Eric Bieniemy,0
+2023,PHI,1,Brian Johnson,0
+2023,NE,1,Bill O'Brien,0
+2024,ATL,1,Zac Robinson,0
+2024,CAR,1,Dave Canales (HC-caller),0
+2024,LAC,1,Greg Roman,0
+2024,LV,1,Luke Getsy,0
+2024,NE,1,Alex Van Pelt,0
+2024,SEA,1,Ryan Grubb,0
+2024,TEN,1,Brian Callahan (HC-caller),0
+2024,WAS,1,Kliff Kingsbury,0
+2024,CHI,1,Shane Waldron,0
+2024,PIT,1,Arthur Smith,0
+2024,CLE,1,Ken Dorsey,0
+2024,NO,1,Klint Kubiak,0
+2024,PHI,1,Kellen Moore,0
+2024,TB,1,Liam Coen,0
+2025,CHI,1,Ben Johnson (HC-caller),0
+2025,LV,1,Chip Kelly,0
+2025,NE,1,Josh McDaniels,0
+2025,JAX,1,Liam Coen (HC-caller),0
+2025,NO,1,Kellen Moore (HC-caller),0
+2025,NYJ,1,Tanner Engstrand,0
+2025,DAL,1,Brian Schottenheimer (HC-caller),0
+2025,TB,1,Josh Grizzard,0
+2025,PHI,1,Kevin Patullo,0
+2025,SEA,1,Klint Kubiak,0
+2025,CLE,1,Tommy Rees,0
+2025,DET,1,John Morton,0
+2025,HOU,1,Nick Caley,0

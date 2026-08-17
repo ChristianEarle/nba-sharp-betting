@@ -1,0 +1,96 @@
+# Fantasy scoring config (Phase 2).
+#
+# Labels ALWAYS use `standard_ppr` — never the shipped `fantasy_points_ppr`
+# column in player_stats.parquet. Each rule maps to an explicit player_stats
+# column (weekly, REG rows only); computing from these lets us verify the
+# formula against player_stats.parquet rather than trusting an upstream
+# column we can't audit.
+#
+# Verified against data/raw/player_stats.parquet (see src/labels/build.py's
+# scoring cross-check): the shipped fantasy_points_ppr additionally credits
+# +6 per special_teams_tds (punt/kickoff-return TDs), which is not part of
+# standard redraft PPR scoring and is deliberately excluded here. That is
+# the only systematic source of (computed - shipped) difference; mean
+# |diff| across all REG player-weeks is ~0.012 pts, and every one of the
+# largest diffs traces to a return TD.
+#
+# fumbles_lost_total is player_stats' own aggregate of every fumble-lost
+# type (rushing/receiving/sack/other) for that player-week; it is NOT the
+# same as rushing_fumbles_lost + receiving_fumbles_lost + sack_fumbles_lost
+# (some fumbles — e.g. lost on a punt/kick return, or a muffed
+# non-designed-play snap — sit outside those three columns but still count
+# toward fumbles_lost_total). Standard scoring docks every fumble a player
+# personally loses regardless of play type, so the aggregate column is the
+# correct one to use, not the three-column sum.
+profiles:
+  standard_ppr:
+    # name -> {points: per-unit value, column: player_stats column(s) summed}
+    rush_yards:
+      points: 0.1
+      column: rushing_yards
+    rec_yards:
+      points: 0.1
+      column: receiving_yards
+    pass_yards:
+      points: 0.04
+      column: passing_yards
+    rush_td:
+      points: 6
+      column: rushing_tds
+    rec_td:
+      points: 6
+      column: receiving_tds
+    pass_td:
+      points: 4
+      column: passing_tds
+    reception:
+      points: 1
+      column: receptions
+    interception:
+      points: -2
+      column: passing_interceptions
+    fumble_lost:
+      points: -2
+      column: fumbles_lost_total
+    two_point_conversion:
+      points: 2
+      # all three 2pt columns (pass/rush/rec) score identically; summed as
+      # one rule rather than three separate +2 rules.
+      column: [passing_2pt_conversions, rushing_2pt_conversions, receiving_2pt_conversions]
+
+  # Placeholder for a real user-league scoring config (e.g. TE premium,
+  # different PPR tier, 6pt pass TDs). Identical to standard_ppr for now;
+  # labels never read this profile. Kept here so the config shape (and any
+  # future divergence) lives in one file instead of being invented ad hoc
+  # later.
+  user_league:
+    rush_yards:
+      points: 0.1
+      column: rushing_yards
+    rec_yards:
+      points: 0.1
+      column: receiving_yards
+    pass_yards:
+      points: 0.04
+      column: passing_yards
+    rush_td:
+      points: 6
+      column: rushing_tds
+    rec_td:
+      points: 6
+      column: receiving_tds
+    pass_td:
+      points: 4
+      column: passing_tds
+    reception:
+      points: 1
+      column: receptions
+    interception:
+      points: -2
+      column: passing_interceptions
+    fumble_lost:
+      points: -2
+      column: fumbles_lost_total
+    two_point_conversion:
+      points: 2
+      column: [passing_2pt_conversions, rushing_2pt_conversions, receiving_2pt_conversions]

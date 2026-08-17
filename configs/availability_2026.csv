@@ -1,0 +1,29 @@
+# Availability screen for the 2026 breakout board (Phase 6.3) -- MANUAL, user-maintained.
+#
+# No real rows are seeded here on purpose: this environment's knowledge cutoff
+# (Jan 2026) cannot reliably cover spring/summer 2026 camp/injury news, and
+# guessing at availability is worse than leaving it blank. Only the schema and
+# commented examples ship in this file -- filling in real rows against a
+# current injury report is a ~5 minute task for whoever runs the 2026 board,
+# noted in the README's Known Limitations section.
+#
+# Columns:
+#   player   - display name, matched to the board via normalized-name + position
+#              (src.ingest.id_map.normalize_name -- same matching used across this repo)
+#   position - QB, RB, WR, or TE (case-insensitive)
+#   status   - out | limited | note
+#              out:     unlikely/unable to play Week 1
+#              limited: practicing on a limited/PUP-adjacent basis, timeline uncertain
+#              note:    no real availability risk, just worth flagging (e.g. a
+#                       suspension appeal, a camp competition, a role change rumor)
+#   note     - free text, shown alongside the flag on the board
+#
+# src.inference.board_2026 FLAGS a matched player -- it never drops them from the
+# board. An "out" WR1 with an elite underlying profile is still exactly the kind
+# of player a reader needs to see and personally discount, not have silently
+# removed. A player absent from this file reads as "not flagged", never as
+# "confirmed healthy" -- this file is not a complete injury report.
+#
+player,position,status,note
+#Example Player,WR,limited,hamstring - camp report only as of this writing, re-verify closer to Week 1
+#Another Player,RB,out,PUP list to open camp per beat reporters, return timeline unclear
