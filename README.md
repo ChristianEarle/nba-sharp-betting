@@ -5,8 +5,9 @@ fantasy-relevant skill player (QB/RB/WR/TE) it is intended to output a calibrate
 breakout probability, an expected finish-vs-ADP delta, and the SHAP drivers behind
 each call.
 
-> **Status: Phase 2 complete.** nflverse ingest, market expectation, and
-> breakout labels are built; nothing is modelled yet. See
+> **Status: Phase 4 (WR) complete.** nflverse ingest, market expectation,
+> breakout labels, WR features, and a first WR breakout model (with
+> validation + one frozen holdout evaluation) are built. See
 > [Progress](#progress) for what is and is not done.
 
 ## Setup
@@ -154,8 +155,31 @@ read from the shipped `fantasy_points_ppr` column. See
 - [ ] **Phase 1c** — Vegas / The Odds API (paid; out of v1 training features)
 - [x] **Phase 2** — labels: `configs/scoring.yaml`, `configs/labels.yaml`,
       `data/processed/labels.parquet` (2014–2025, QB/RB/WR/TE, 6,978 rows)
-- [ ] **Phase 3** — features (WR first)
-- [ ] **Phase 4** — modelling and validation
+- [x] **Phase 3 (WR)** — feature builders, leakage-tested two ways
+      (season-N stats stripped ⇒ identical output; team context keyed to
+      Week-1 rosters, not final-team rosters)
+- [x] **Phase 4 (WR)** — LGBM+XGB+logistic blend, isotonic-calibrated,
+      expanding-window CV (val 2020–2023), one frozen holdout eval
+      (2024–2025). **Honest verdict:** validation pooled PR-AUC 0.403 and
+      top-10 precision 0.40 vs ≤0.04/0.00 for all three baselines; on the
+      holdout the model beats prior-season-ppg on PR-AUC (0.101 vs 0.038)
+      and takes 2025 top-10 precision 0.20 (Olave, Rice) vs 0.00 for every
+      baseline, but 2024 had a single league-wide WR breakout that nothing
+      caught, and 7 holdout positives total make all of this thin evidence.
+      Modest real lift, consistent with the brief's expectations — not
+      proof of a large edge.
+- [ ] **Phase 3/4 fan-out** — RB, TE, QB (next)
+- [x] **Phase 4 (WR only)** — `src/models/cv.py` (4 expanding-window
+      validation folds 2020-2023 + a structurally separate 2024/2025
+      holdout split), `src/models/train_wr.py` (LGBM + XGB + L2-logistic
+      classifier trio, Optuna-tuned, blended and isotonic-calibrated; LGBM
+      + XGB regressor for `finish_rank_delta`), `src/models/baselines.py`
+      (ADP-knows-best, prior-season-ppg-rank, age-adjusted-ADP),
+      `configs/model_wr.yaml`. One frozen holdout evaluation on 2024/2025 —
+      see `outputs/model_wr_report.md` (gitignored; regenerate with
+      `python -m src.models.train_wr`) for the full validation/holdout
+      tables, calibration check, and the honesty-rule verdict against the
+      prior-season-ppg baseline. Not yet done: QB/RB/TE heads, SHAP.
 - [ ] **Phase 5** — SHAP explainability
 - [ ] **Phase 6** — 2026 inference and market overlay
 - [ ] **Phase 7** — tests, guardrails, docs
