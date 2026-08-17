@@ -1,0 +1,50 @@
+# Breakout label thresholds (Phase 2). All editable here — src/labels/build.py
+# reads this file rather than hardcoding thresholds.
+#
+# A breakout is a player who both (a) finished the season inside the
+# `finish_top` positional range and (b) was *not* expected to: their
+# preseason market-expectation positional rank was `adp_worse_than` or
+# worse (higher number = worse rank). Both conditions must hold.
+scoring_profile: standard_ppr
+
+thresholds:
+  QB:
+    finish_top: 12 # finished top-12 QB by season ppr_ppg
+    adp_worse_than: 16 # preseason expectation QB16 or later
+  RB:
+    finish_top: 15
+    adp_worse_than: 25
+  WR:
+    finish_top: 18
+    adp_worse_than: 31
+  TE:
+    finish_top: 8
+    adp_worse_than: 13
+
+# Players with fewer than this many REG-season games (per-game finish rank
+# basis, computed on ppr_ppg not season total) get no finish_pos_rank and
+# therefore breakout=0. Guards against a 2-game garbage-time ppg leader
+# reading as a "top finish."
+min_games: 8
+
+# Seasons the labels table covers. 2020-2025 join real market_expectation
+# (ecr); 2014-2019 use the prior-season-finish proxy (proxy); 2013 is
+# excluded because it has no prior season in player_stats to build that
+# proxy from.
+label_seasons:
+  start: 2014
+  end: 2025
+
+# Rows to exclude from the *modeling pool* (in_training_pool=False) without
+# dropping them from the output table. Targets thin-sample noise: a player
+# with a very low prior-season per-game rate who was also unranked/deep in
+# the preseason market is disproportionately likely to have a fluky
+# thresholds-crossing "breakout" season driven by a handful of good games
+# rather than a real role change, and is likely off the model's feature
+# distribution besides (rookies get excluded from the pool separately, via
+# is_rookie, regardless of this filter — they have no prior season to check
+# against and are handled by a dedicated rookie heuristic later).
+training_pool_filter:
+  enabled: true
+  min_prior_ppg: 3.0
+  max_pos_rank_when_low_ppg: 60

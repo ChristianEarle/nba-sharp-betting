@@ -5,14 +5,17 @@ fantasy-relevant skill player (QB/RB/WR/TE) it is intended to output a calibrate
 breakout probability, an expected finish-vs-ADP delta, and the SHAP drivers behind
 each call.
 
-> **Status: Phase 1a complete.** nflverse ingest is built and cached; nothing is
-> modelled yet. See [Progress](#progress) for what is and is not done.
+> **Status: Phase 2 complete.** nflverse ingest, market expectation, and
+> breakout labels are built; nothing is modelled yet. See
+> [Progress](#progress) for what is and is not done.
 
 ## Setup
 
 ```bash
 uv sync --extra dev
 uv run python -m src.ingest.nflverse   # pull + cache nflverse data (~40s cold)
+uv run python -m src.ingest.adp        # build market_expectation.parquet
+uv run python -m src.labels.build      # build labels.parquet
 uv run pytest -q
 ```
 
@@ -94,6 +97,33 @@ positional rank. Coverage and quality:
 ECR is consensus *rank*, not literal draft position, but the pipeline uses
 positional rank everywhere precisely so this distinction stays immaterial.
 
+### Breakout labels (Phase 2)
+
+`data/processed/labels.parquet` (`src/labels/build.py`) is one row per
+(season, gsis_id), 2014–2025, for every QB/RB/WR/TE with a REG-season
+appearance. Fantasy points are **computed** from weekly stats via
+`configs/scoring.yaml`'s `standard_ppr` profile — never the shipped
+`fantasy_points_ppr` column, which additionally credits punt/kickoff-return
+TDs that standard redraft PPR scoring doesn't count (mean |diff| ~0.012
+pts/player-week; see the module docstring and `__main__`'s cross-check for
+detail).
+
+A player's *finish* is their within-position rank by PPR points-per-game
+(min 8 REG games to qualify). Their *expectation* is the preseason market's
+positional rank: `market_expectation.parquet` directly for 2020–2025
+(`adp_source=ecr`), the player's own prior-season finish rank for
+2014–2019 (`adp_source=proxy`, since no real market data reaches that far
+back), or — for anyone either source has no rank for — one slot behind the
+deepest rank that era's signal reaches for that season+position
+(`adp_source=capped`). Capped players are never dropped: an unranked player
+who breaks out is exactly the case this model exists to catch.
+`breakout = 1` iff the finish clears the position's `finish_top` threshold
+*and* the expectation was `adp_worse_than` threshold or deeper
+(`configs/labels.yaml`). `in_training_pool` additionally drops rookie
+seasons and thin/low-signal player-seasons (low prior-season ppg + deep
+preseason rank) from the *modeling* pool without removing them from the
+table.
+
 The ID crosswalk resolves external names/ids to nflverse `gsis_id` via a
 three-rung ladder (FantasyPros-id join → exact normalized name+position →
 fuzzy ≥93 with margin). One subtlety worth knowing: `ff_playerids` stamps
@@ -109,8 +139,10 @@ knowable before Week 1 of season N — season N-1 and earlier stats, plus offsea
 facts (draft, trades, coaching changes, depth charts). To be enforced by test in
 Phase 3.
 
-**Scoring is computed, not sourced.** Full-PPR scoring will be defined in
-`configs/scoring.yaml` and fantasy points derived from weekly stats.
+**Scoring is computed, not sourced.** Full-PPR scoring is defined in
+`configs/scoring.yaml`; fantasy points are derived from weekly stats, never
+read from the shipped `fantasy_points_ppr` column. See
+[Breakout labels](#breakout-labels-phase-2).
 
 ## Progress
 
@@ -118,9 +150,10 @@ Phase 3.
 - [x] **Phase 1a** — nflverse pulls cached, row counts verified per season
 - [x] **Phase 1d** — ID crosswalk: 100% top-200 match rate, all seasons
 - [x] **Phase 1b** — market expectation: FantasyPros ECR 2020–2025 (real),
-      2014–2019 to be proxy-labeled in Phase 2 — see below
+      2014–2019 proxy-labeled in Phase 2 — see below
 - [ ] **Phase 1c** — Vegas / The Odds API (paid; out of v1 training features)
-- [ ] **Phase 2** — labels
+- [x] **Phase 2** — labels: `configs/scoring.yaml`, `configs/labels.yaml`,
+      `data/processed/labels.parquet` (2014–2025, QB/RB/WR/TE, 6,978 rows)
 - [ ] **Phase 3** — features (WR first)
 - [ ] **Phase 4** — modelling and validation
 - [ ] **Phase 5** — SHAP explainability
