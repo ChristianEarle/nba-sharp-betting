@@ -702,6 +702,13 @@ def holdout_predictions(df: pd.DataFrame, seed: int, frozen: dict) -> pd.DataFra
 
 
 def holdout_regression_eval(df: pd.DataFrame, seed: int, frozen: dict) -> dict:
+    """Retrain the regression head on <=2023 at its frozen hyperparameters, score 2024+2025.
+
+    Stashes the two fitted regressors on ``frozen["_holdout_reg_models"]`` — the same
+    "compute + persist in one pass" pattern ``holdout_predictions`` uses for the classifier
+    trio — so ``save_artifacts`` can ship a bundle Phase 6 can score 2026 rows with, instead
+    of only ever reporting an RMSE and discarding the fitted models.
+    """
     split = holdout_split()
     reg_df = df[df["finish_rank_delta"].notna()]
     train_df = reg_df[reg_df["season"].isin(split.train_seasons)]
@@ -722,6 +729,7 @@ def holdout_regression_eval(df: pd.DataFrame, seed: int, frozen: dict) -> dict:
     xgb_model.fit(train_df[tree_cols], train_df["finish_rank_delta"])
     xgb_rmse = mt.rmse(holdout_df["finish_rank_delta"], xgb_model.predict(holdout_df[tree_cols]))
 
+    frozen["_holdout_reg_models"] = {"lgbm_reg": lgbm_model, "xgb_reg": xgb_model}
     return {"lgbm_rmse": lgbm_rmse, "xgb_rmse": xgb_rmse, "n": int(len(holdout_df))}
 
 
@@ -877,12 +885,20 @@ def run_full_pipeline(
 
 
 def save_artifacts(spec: PositionSpec, frozen: dict, seed: int, cfg: dict) -> None:
+    """Persist the frozen holdout-retrained bundle: classifier trio + blend/calibration
+
+    metadata (unchanged) plus the two holdout-retrained regressors
+    (``lgbm_reg``/``xgb_reg``, keyed distinctly from the classifier's ``lgbm``/``xgb`` so
+    both survive in one payload) — Phase 6 scores 2026 rows with exactly these objects,
+    never re-fitting anything.
+    """
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    to_save = {k: v for k, v in frozen.items() if k != "_holdout_models"}
+    _PRIVATE_KEYS = ("_holdout_models", "_holdout_reg_models")
+    to_save = {k: v for k, v in frozen.items() if k not in _PRIVATE_KEYS}
     to_save["seed"] = seed
     to_save["cfg"] = cfg
     to_save["position"] = spec.position
-    payload = {**to_save, **frozen.get("_holdout_models", {})}
+    payload = {**to_save, **frozen.get("_holdout_models", {}), **frozen.get("_holdout_reg_models", {})}
     joblib.dump(payload, spec.artifact_path)
 
 

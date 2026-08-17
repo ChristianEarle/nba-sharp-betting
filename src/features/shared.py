@@ -136,6 +136,11 @@ TEAM_ALIASES = {
     "PHO": "ARI",
     "RAI": "LV",
     "RAM": "LA",
+    # rosters.parquet uses "AZ" for Arizona starting with the 2026 season
+    # snapshot (every other season, and every other 2026 source --
+    # schedules, draft_picks, player_stats -- uses "ARI"); verified directly
+    # against the cached 2026 data while building Phase 6.
+    "AZ": "ARI",
 }
 
 # Undrafted-player sentinel (spec): one round past the real 7, and a pick

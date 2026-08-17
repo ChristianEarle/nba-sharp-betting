@@ -1,7 +1,14 @@
 data/*
 !data/external/
 data/external/adp/*.csv
-outputs/
+# outputs/ is gitignored (regenerable model reports/SHAP plots/scratch), except
+# the 2026 board -- that's a deliverable, tracked like any other checked-in file.
+# Trailing-slash "outputs/" would ignore the directory itself, which git will not
+# let a later "!" re-include a file inside of -- "outputs/*" ignores contents
+# instead, which negation can then carve exceptions out of.
+outputs/*
+!outputs/breakout_board_2026.csv
+!outputs/breakout_board_2026.md
 __pycache__/
 *.pyc
 .venv/

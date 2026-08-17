@@ -130,7 +130,8 @@ def pull_dataset(
 
     if spec.get("seasonal", False):
         first = spec.get("first_available")
-        want = [s for s in seasons if first is None or s >= first]
+        last = spec.get("last_available")
+        want = [s for s in seasons if (first is None or s >= first) and (last is None or s <= last)]
         if not want:
             return PullResult(name, None, 0, 0, [], cached=False, error="no seasons in range")
         kwargs["seasons"] = want
