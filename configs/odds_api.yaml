@@ -1,0 +1,66 @@
+# The Odds API ingest config (v1.5, Phase 1c revisit -- src/ingest/odds_api.py).
+#
+# This environment's egress proxy blocks api.the-odds-api.com outright
+# (verified: every request to it fails at the proxy, not at the API itself).
+# Nothing in src/ingest/odds_api.py is executed against the network from
+# here -- it is code-complete and meant to be run locally, where the proxy
+# is not in the way. See the README's "v1.5 Odds API (local run required)"
+# section for the exact command sequence.
+
+base_url: https://api.the-odds-api.com/v4
+sport_key: americanfootball_nfl
+
+# the-odds-api regions parameter. One region keeps the per-request cost
+# formula (see below) at its cheapest; nothing here needs more than US
+# books for team-level h2h/spreads/totals or season-long futures.
+region: us
+
+# Hard abort threshold (credits). Every network subcommand refuses to make
+# a call that would push the running *projected* total past this, or past
+# the account's own x-requests-remaining once that header has been read at
+# least once this run -- whichever is stricter. This is a budget ceiling
+# for one CLI invocation, not a monthly/account-wide cap.
+credit_budget: 3000
+
+# Featured markets pulled for every team-level snapshot (--pull-team).
+# the-odds-api's own pricing: historical odds cost 10 credits x regions x
+# markets *actually returned with data* per request -- requesting all
+# three in one call is one request, not three.
+featured_markets: [h2h, spreads, totals]
+
+# First season considered "props era" for this build -- the-odds-api's
+# player-prop market coverage for NFL is documented (as of this module's
+# writing) starting around the 2023 season; earlier seasons are not
+# expected to carry player-level markets at all. --pull-props only
+# considers props_era_start..latest configured snapshot season.
+props_era_start: 2023
+
+# Preseason snapshot seasons. Actual snapshot *dates* are derived at
+# runtime from data/raw/schedules.parquet (src.ingest.odds_api.
+# snapshot_dates_for_seasons): each season's first REG-season gameday,
+# minus 4 days, at T12:00:00Z -- a stable, reproducible "market a few days
+# before kickoff" timestamp that doesn't need to be hand-maintained here
+# every time schedules.parquet is refreshed.
+snapshot_seasons: [2020, 2021, 2022, 2023, 2024, 2025]
+
+# Candidate season-long futures market keys to probe with --verify-futures.
+# NOT confirmed to exist -- the-odds-api's public docs enumerate live
+# per-game player-prop markets (player_pass_yds, player_rush_yds, ...) and
+# team futures (team_win_totals, ...) explicitly, but do not document a
+# stable "season-long player total" market key as of this module's
+# writing. These candidates follow the same naming convention the API uses
+# for its confirmed per-game player markets, extended with a `_season`
+# suffix (the most plausible convention if the API supports this at all),
+# plus two known-shaped team futures markets kept in for comparison.
+# --verify-futures is the actual source of truth for which of these exist;
+# nothing here is asserted true until that call runs and reports back.
+candidate_futures_markets:
+  - player_pass_yds_season
+  - player_pass_tds_season
+  - player_rush_yds_season
+  - player_rush_tds_season
+  - player_reception_yds_season
+  - player_receptions_season
+  - player_anytime_td_season
+  - team_win_totals
+  - team_to_make_playoffs

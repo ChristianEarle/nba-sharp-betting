@@ -68,12 +68,17 @@ Column groups in the output
   air_yards_share, wopr, targets_pg, receptions_pg, rec_yards_pg, adot,
   ppr_ppg, expected_ppr_ppg, efficiency_residual_pg, yards_per_reception,
   td_rate, snap_share (nullable), avg_separation/avg_cushion/
-  catch_percentage (nullable, NGS 2016+)
+  catch_percentage (nullable, NGS 2016+), rz_target_share/ez_target_share
+  (nullable, pbp 1999+ but pulled per configs/data.yaml's `pbp` entry --
+  v1.5, Phase C: share of the player's N-1 primary team's own red-zone
+  (yardline_100<=20) / end-zone-adjacent (<=10) targets -- see
+  ``src.features.shared.redzone_share_table``)
 
-Optional inputs (snap_counts, ngs_receiving, coaching_changes) are
+Optional inputs (snap_counts, ngs_receiving, coaching_changes, pbp) are
 genuinely optional: every function here runs fine with any of them
 ``None``, producing null columns instead of raising. Verified against
-pre-2016 rows (no NGS) in ``tests/test_features.py``.
+pre-2016 rows (no NGS) in ``tests/test_features.py`` and against
+pbp-absent input in ``tests/test_features_pbp.py``.
 """
 
 from __future__ import annotations
@@ -103,6 +108,10 @@ POSITION = "WR"
 
 # Every base metric gets a "{name}_n1" (season N-1 value) and
 # "{name}_yoy_delta" (N-1 minus N-2, null when N-2 is missing) column.
+# rz_target_share / ez_target_share are v1.5 additions (Phase C, built from
+# play-by-play -- see src.features.shared.redzone_share_table); nullable by
+# design when pbp is absent (required: false in configs/data.yaml, and
+# genuinely nonexistent for the 2026 season -- no games played yet).
 BASE_METRICS = [
     "target_share",
     "air_yards_share",
@@ -120,7 +129,14 @@ BASE_METRICS = [
     "avg_separation",
     "avg_cushion",
     "catch_percentage",
+    "rz_target_share",
+    "ez_target_share",
 ]
+
+# yardline_100 thresholds for the two pbp-derived target-share features --
+# see src.features.shared.redzone_share_table's docstring for the exact
+# "share of the *team's* usage inside this threshold" definition.
+REDZONE_THRESHOLDS = {"rz_target_share": 20, "ez_target_share": 10}
 
 _OUT_COLUMNS = (
     ["season", "gsis_id", "player_name", "team", "preseason_team_fallback"]
@@ -263,10 +279,15 @@ def build_raw_stat_table(
     snap_counts: pl.DataFrame | None,
     rosters: pl.DataFrame | None,
     ngs_receiving: pl.DataFrame | None,
+    pbp: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """season, gsis_id -> every BASE_METRICS column, for the season the row is labeled (not shifted).
 
-    ``reg`` must already carry ``computed_points`` (see ``_reg_with_points``).
+    ``reg`` must already carry ``computed_points`` (see ``_reg_with_points``). ``pbp``
+    (v1.5, Phase C) is optional -- see ``src.features.shared.redzone_share_table`` and this
+    module's ``REDZONE_THRESHOLDS``; ``None`` (pbp not pulled, or the 2026 season with no
+    games played) yields null ``rz_target_share``/``ez_target_share`` columns, same
+    optional-source convention as ``snap_counts``/``ngs_receiving`` below.
     """
     totals = season_aggregates(reg).select("season", "gsis_id", "games", "ppr_ppg")
     out = totals.join(_rate_stats(reg), on=["season", "gsis_id"], how="left")
@@ -287,6 +308,16 @@ def build_raw_stat_table(
     else:
         out = out.with_columns(
             [pl.lit(None, dtype=pl.Float64).alias(c) for c in ["avg_separation", "avg_cushion", "catch_percentage"]]
+        )
+
+    if pbp is not None:
+        rz = sh.redzone_share_table(
+            pbp, team_assign, play_col="pass_attempt", player_col="receiver_player_id", thresholds=REDZONE_THRESHOLDS
+        )
+        out = out.join(rz, on=["season", "gsis_id"], how="left")
+    else:
+        out = out.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(c) for c in REDZONE_THRESHOLDS]
         )
 
     return out.select(["season", "gsis_id"] + BASE_METRICS)
@@ -326,6 +357,7 @@ def build_features_wr(
     snap_counts: pl.DataFrame | None = None,
     ngs_receiving: pl.DataFrame | None = None,
     coaching_changes: pl.DataFrame | None = None,
+    pbp: pl.DataFrame | None = None,
     scoring_profile: dict | None = None,
 ) -> pl.DataFrame:
     """Build the WR feature table from already-loaded frames.
@@ -333,7 +365,8 @@ def build_features_wr(
     Every argument is a polars DataFrame, not a path — the leakage test
     exploits this directly, passing a `player_stats` frame with a season's
     rows stripped out to prove that season's own feature rows never used
-    them.
+    them (and, v1.5, a `pbp` frame the same way -- see
+    ``tests/test_features_pbp.py``).
     """
     if scoring_profile is None:
         scoring_profile = load_scoring_config()
@@ -342,7 +375,7 @@ def build_features_wr(
     team_assign = sh.team_assignments(reg)
 
     raw = build_raw_stat_table(
-        reg, team_assign, ff_opportunity, schedules, snap_counts, rosters, ngs_receiving
+        reg, team_assign, ff_opportunity, schedules, snap_counts, rosters, ngs_receiving, pbp
     )
 
     target = labels.filter((pl.col("position") == POSITION) & (~pl.col("is_rookie"))).select(
@@ -388,6 +421,7 @@ def load_and_build(
     snap_counts_path: Path = sh.PATHS["snap_counts"],
     ngs_receiving_path: Path = NGS_RECEIVING_PATH,
     coaching_changes_path: Path = sh.PATHS["coaching_changes"],
+    pbp_path: Path = RAW_DIR / "pbp.parquet",
     out_path: Path = OUT_PATH,
 ) -> pl.DataFrame:
     """Load every default source from disk and build + write features_wr.parquet."""
@@ -401,6 +435,7 @@ def load_and_build(
     snap_counts = pl.read_parquet(snap_counts_path) if snap_counts_path.exists() else None
     ngs_receiving = pl.read_parquet(ngs_receiving_path) if ngs_receiving_path.exists() else None
     coaching_changes = sh.load_coaching_changes(coaching_changes_path)
+    pbp = pl.read_parquet(pbp_path) if pbp_path.exists() else None
 
     out = build_features_wr(
         labels=labels,
@@ -413,6 +448,7 @@ def load_and_build(
         snap_counts=snap_counts,
         ngs_receiving=ngs_receiving,
         coaching_changes=coaching_changes,
+        pbp=pbp,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.write_parquet(out_path)
@@ -469,10 +505,12 @@ def main() -> int:
         and "avg_separation" not in c
         and "avg_cushion" not in c
         and "catch_percentage" not in c
+        and "rz_target_share" not in c
+        and "ez_target_share" not in c
     ]
     with pl.Config(tbl_rows=-1, tbl_width_chars=200):
         print(nr.filter(pl.col("column").is_in(core_cols)).pivot("era", index="column", values="null_rate"))
-        print("\nNGS/snap (nullable-by-design) columns:")
+        print("\nNGS/snap/pbp (nullable-by-design) columns:")
         print(nr.filter(~pl.col("column").is_in(core_cols)).pivot("era", index="column", values="null_rate"))
 
     print("\nSanity rows:")

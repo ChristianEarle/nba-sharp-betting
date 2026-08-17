@@ -52,3 +52,16 @@ re-ranking, no formula applied to it. The brief scopes Vegas data out of
 *training* entirely (see the README's Known Limitations); this file is
 strictly a manual, presentation-layer cross-check a reader can eyeball
 next to the model's own probability.
+
+`odds_api/` (v1.5) is a separate, code-generated subtree — see the main
+README's "v1.5 Odds API (local run required)" section and
+`src/ingest/odds_api.py`'s module docstring. It is not this directory's
+manual-CSV mechanism: `odds_api/raw/*.json` and `odds_api/manifest.json`
+are produced by `src.ingest.odds_api`'s network subcommands (local run
+only, this environment's proxy blocks the API), and
+`odds_api/team_lines.parquet` by its `--normalize`. Nothing currently
+reads `team_lines.parquet` into `vegas_implied_2026.csv`'s schema
+automatically -- a real team-level moneyline/spread/total isn't the same
+quantity as `implied_pts` (a season-long fantasy-points estimate), so
+that would need its own explicit conversion, not a blind copy; left as a
+manual follow-up.

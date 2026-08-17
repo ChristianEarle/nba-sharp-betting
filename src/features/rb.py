@@ -61,8 +61,15 @@ himself part of; it is scoped and shifted exactly like every other
 delta) even though it is a team fact, because "how committee was my own
 team's backfield" is precisely the N-1 context a breakout call needs.
 
-Skipped by design (documented per the brief, not implemented here):
-red-zone/goal-line carry share (needs play-by-play, deferred), depth
+v1.5 additions (Phase C, play-by-play): rz_carry_share (yardline_100<=20)
+and goal_line_carry_share (yardline_100<=5), each the player's share of
+his N-1 primary team's own carries inside that yardline threshold — see
+``src.features.shared.redzone_share_table``. v1 deferred these entirely
+(no pbp pulled at all); nullable by design when pbp is absent (required:
+false in configs/data.yaml, and genuinely nonexistent for the 2026
+season).
+
+Skipped by design (documented per the brief, not implemented here): depth
 chart position (no 2025 depth-chart snapshot available), offensive-line
 continuity (no source in data/raw).
 
@@ -97,6 +104,10 @@ COMMITTEE_CARRY_SHARE_THRESHOLD = 0.20
 
 # Every base metric gets a "{name}_n1" (season N-1 value) and
 # "{name}_yoy_delta" (N-1 minus N-2, null when N-2 is missing) column.
+# rz_carry_share / goal_line_carry_share are v1.5 additions (Phase C, built
+# from play-by-play -- see src.features.shared.redzone_share_table);
+# nullable by design when pbp is absent (required: false, and genuinely
+# nonexistent for 2026 -- no games played yet).
 BASE_METRICS = [
     "carry_share",
     "target_share",
@@ -113,7 +124,14 @@ BASE_METRICS = [
     "snap_share",
     "rush_yards_over_expected_per_att",
     "ngs_efficiency",
+    "rz_carry_share",
+    "goal_line_carry_share",
 ]
+
+# yardline_100 thresholds for the two pbp-derived carry-share features --
+# see src.features.shared.redzone_share_table's docstring for the exact
+# "share of the *team's* usage inside this threshold" definition.
+REDZONE_THRESHOLDS = {"rz_carry_share": 20, "goal_line_carry_share": 5}
 
 _OUT_COLUMNS = (
     ["season", "gsis_id", "player_name", "team", "preseason_team_fallback"]
@@ -237,10 +255,13 @@ def build_raw_stat_table(
     snap_counts: pl.DataFrame | None,
     rosters: pl.DataFrame | None,
     ngs_rushing: pl.DataFrame | None,
+    pbp: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """season, gsis_id -> every BASE_METRICS column, for the season the row is labeled (not shifted).
 
-    ``reg`` must already carry ``computed_points`` (see ``sh.reg_with_points``).
+    ``reg`` must already carry ``computed_points`` (see ``sh.reg_with_points``). ``pbp``
+    (v1.5, Phase C) is optional -- see ``src.features.shared.redzone_share_table`` and this
+    module's ``REDZONE_THRESHOLDS``; ``None`` yields null rz_carry_share/goal_line_carry_share.
     """
     totals = season_aggregates(reg).select("season", "gsis_id", "games", "ppr_ppg")
     out = totals.join(_rate_stats(reg), on=["season", "gsis_id"], how="left")
@@ -262,6 +283,16 @@ def build_raw_stat_table(
     else:
         out = out.with_columns(
             [pl.lit(None, dtype=pl.Float64).alias(c) for c in ["rush_yards_over_expected_per_att", "ngs_efficiency"]]
+        )
+
+    if pbp is not None:
+        rz = sh.redzone_share_table(
+            pbp, team_assign, play_col="rush_attempt", player_col="rusher_player_id", thresholds=REDZONE_THRESHOLDS
+        )
+        out = out.join(rz, on=["season", "gsis_id"], how="left")
+    else:
+        out = out.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(c) for c in REDZONE_THRESHOLDS]
         )
 
     return out.select(["season", "gsis_id"] + BASE_METRICS)
@@ -301,12 +332,14 @@ def build_features_rb(
     snap_counts: pl.DataFrame | None = None,
     ngs_rushing: pl.DataFrame | None = None,
     coaching_changes: pl.DataFrame | None = None,
+    pbp: pl.DataFrame | None = None,
     scoring_profile: dict | None = None,
 ) -> pl.DataFrame:
     """Build the RB feature table from already-loaded frames.
 
     Every argument is a polars DataFrame, not a path — the leakage test
-    exploits this directly, same mechanism as ``src.features.wr``.
+    exploits this directly, same mechanism as ``src.features.wr`` (and,
+    v1.5, ``pbp`` the same way -- see ``tests/test_features_pbp.py``).
     """
     if scoring_profile is None:
         scoring_profile = load_scoring_config()
@@ -315,7 +348,7 @@ def build_features_rb(
     team_assign = sh.team_assignments(reg)
 
     raw = build_raw_stat_table(
-        reg, team_assign, ff_opportunity, schedules, snap_counts, rosters, ngs_rushing
+        reg, team_assign, ff_opportunity, schedules, snap_counts, rosters, ngs_rushing, pbp
     )
 
     target = labels.filter((pl.col("position") == POSITION) & (~pl.col("is_rookie"))).select(
@@ -362,6 +395,7 @@ def load_and_build(
     snap_counts_path: Path = sh.PATHS["snap_counts"],
     ngs_rushing_path: Path = NGS_RUSHING_PATH,
     coaching_changes_path: Path = sh.PATHS["coaching_changes"],
+    pbp_path: Path = RAW_DIR / "pbp.parquet",
     out_path: Path = OUT_PATH,
 ) -> pl.DataFrame:
     """Load every default source from disk and build + write features_rb.parquet."""
@@ -375,6 +409,7 @@ def load_and_build(
     snap_counts = pl.read_parquet(snap_counts_path) if snap_counts_path.exists() else None
     ngs_rushing = pl.read_parquet(ngs_rushing_path) if ngs_rushing_path.exists() else None
     coaching_changes = sh.load_coaching_changes(coaching_changes_path)
+    pbp = pl.read_parquet(pbp_path) if pbp_path.exists() else None
 
     out = build_features_rb(
         labels=labels,
@@ -387,6 +422,7 @@ def load_and_build(
         snap_counts=snap_counts,
         ngs_rushing=ngs_rushing,
         coaching_changes=coaching_changes,
+        pbp=pbp,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.write_parquet(out_path)
@@ -439,6 +475,8 @@ def main() -> int:
         and "snap_share" not in c
         and "rush_yards_over_expected_per_att" not in c
         and "ngs_efficiency" not in c
+        and "rz_carry_share" not in c
+        and "goal_line_carry_share" not in c
     ]
     with pl.Config(tbl_rows=-1, tbl_width_chars=200):
         print(nr.filter(pl.col("column").is_in(core_cols)).pivot("era", index="column", values="null_rate"))
