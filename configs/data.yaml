@@ -35,6 +35,16 @@ datasets:
     seasonal: true
     first_available: 1999
     required: true
+  # Weekly rosters exist to answer one question the season-level rosters
+  # cannot: who was on the team at Week 1, BEFORE any in-season trades. The
+  # season-level table reflects the player's final team, which is future
+  # information relative to preseason prediction (e.g. Davante Adams 2024
+  # reads NYJ, his October trade destination).
+  rosters_weekly:
+    loader: load_rosters_weekly
+    seasonal: true
+    first_available: 2002
+    required: true
   draft_picks:
     loader: load_draft_picks
     seasonal: false
