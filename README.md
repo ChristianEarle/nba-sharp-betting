@@ -477,13 +477,26 @@ it without ever touching the network itself.
   use the player's own prior-season finish rank as `expectation_pos_rank`
   (`adp_source=proxy`) because no reachable ADP archive covers that far
   back in this environment — see "Market expectation" above.
-- **No Vegas data anywhere in training.** The brief scopes Vegas/odds data
-  to the overlay only (`data/external/vegas_implied_2026.csv`, optional,
-  manual, presentation-layer). v1.5 built the ingest (`src/ingest/odds_api.py`)
-  but it is code-complete, not executed — see "v1.5 Odds API (local run
-  required)" above — this environment's egress proxy blocks
-  `api.the-odds-api.com` outright, a paid API this environment can't
-  reach regardless of the code being ready.
+- **Vegas features are acquired and measured, but off by default — they
+  don't help.** (v1.6, retiring v1.5's "No Vegas data anywhere in
+  training" entry.) The Odds API acquisition ran locally 2026-08-17:
+  preseason team lines 2020–2025 plus Week-1 player props are checked in
+  under `data/external/odds_api/` (1,704 credits, exact ledger in that
+  commit). `src/features/vegas.py` derives per-(season, team) features
+  (implied points, totals, spreads, de-vigged win prob) and attaches them
+  to the feature tables; `src/models/ablation_vegas.py` is a controlled
+  fixed-hyperparameter A/B over the repo's own folds. Measured verdict:
+  no reliable lift at any position, and a consistent mild *negative* for
+  QB (holdout PR-AUC −0.09/−0.13) — the market signal is already largely
+  priced into `expectation_pos_rank` (ADP/ECR is itself a market), and
+  vegas coverage starting at 2020 leaves early folds learning from null
+  columns. The attach step is therefore not part of the default
+  `make retrain` pipeline; re-run the ablation with
+  `uv run python -m src.features.vegas && uv run python -m src.models.ablation_vegas`.
+  Week-1 props (2024–2025 + one 2023 game — measured, see
+  `src/features/vegas.py`'s docstring) sit entirely inside the holdout
+  years and are not modeled at all; the raw JSON is retained for when
+  future seasons make them trainable.
 - **The rookie model is a heuristic, not a Phase-4-grade model.** A single
   shallow L2 logistic on draft capital + combine + landing-team context,
   time-split sanity-checked (not tuned) on ~450–550 historical rookie
