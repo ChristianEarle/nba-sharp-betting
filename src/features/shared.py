@@ -756,6 +756,46 @@ def load_coaching_changes(path: Path = PATHS["coaching_changes"]) -> pl.DataFram
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# Vegas team implied points / win probability (v1.5, Phase C -- Deliverable 3)
+# built from src.ingest.vegas.build_vegas_team's output
+# (data/processed/vegas_team.parquet). Same "optional source -> empty,
+# not raise" contract as new_oc_table/snap_counts/ngs_*: vegas_team=None
+# (file not built yet in this environment) yields an all-null-safe empty
+# table, and attach_vegas_team fills has_vegas=0 -- never null -- for every
+# row with no matching (season, team) priced row, whatever the reason
+# (pre-2020, a team/season the snapshot never priced, or the source file
+# absent entirely).
+# --------------------------------------------------------------------------
+
+
+def vegas_team_features(vegas_team: pl.DataFrame | None) -> pl.DataFrame:
+    """season, team -> implied_ppg, implied_win_prob, has_vegas."""
+    if vegas_team is None or vegas_team.is_empty():
+        return pl.DataFrame(
+            schema={
+                "season": pl.Int64,
+                "team": pl.Utf8,
+                "implied_ppg": pl.Float64,
+                "implied_win_prob": pl.Float64,
+                "has_vegas": pl.Int64,
+            }
+        )
+    return vegas_team.select("season", "team", "implied_ppg", "implied_win_prob", "has_vegas")
+
+
+def attach_vegas_team(
+    df: pl.DataFrame, vegas_team: pl.DataFrame | None, season_col: str = "season", team_col: str = "team"
+) -> pl.DataFrame:
+    """Left-join vegas_team_features onto df (must carry season_col/team_col); has_vegas
+    defaults to 0 (never null) for any row with no matching priced (season, team) row --
+    implied_ppg/implied_win_prob stay null in that case, per the brief's "nullable."
+    """
+    feats = vegas_team_features(vegas_team).rename({"season": season_col, "team": team_col})
+    out = df.join(feats, on=[season_col, team_col], how="left")
+    return out.with_columns(pl.col("has_vegas").fill_null(0))
+
+
 def add_covid_flag(df: pl.DataFrame, season_col: str = "season") -> pl.DataFrame:
     """label_season_2020: 1 if the label season N is 2020 OR its N-1 stats season is 2020 (N==2021).
 

@@ -38,6 +38,15 @@ logistic_feature_subset:
 adp_source_categories: [ecr, proxy, capped]
 adp_source_baseline: ecr
 
+# v1.5 Phase C: Vegas team features (implied_ppg/implied_win_prob/has_vegas,
+# src.ingest.vegas -> src.features.shared.attach_vegas_team) are always added to
+# the feature matrix, but this position's own trees only see them once the
+# promotion experiment (src.models.vegas_experiment) shows a holdout top-10-
+# precision improvement -- see that module's docstring for the frozen-
+# hyperparameter retrain/compare protocol. Listed here (excluded) by default;
+# a promoted position has this list emptied by the experiment run.
+excluded_features: [implied_ppg, implied_win_prob, has_vegas]
+
 # LGBM/XGB train on every numeric feature column in features_wr.parquet
 # (identifiers/labels excluded) — trees handle nulls and high cardinality
 # natively, no reason to restrict them to the logistic subset.

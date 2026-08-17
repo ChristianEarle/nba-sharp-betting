@@ -130,6 +130,7 @@ _OUT_COLUMNS = (
     + ["vacated_target_share", "vacated_carry_share"]
     + ["competition_draft_capital", "supporting_cast_capital"]
     + ["label_season_2020"]
+    + ["implied_ppg", "implied_win_prob", "has_vegas"]
     + [f"{m}_n1" for m in BASE_METRICS]
     + [f"{m}_yoy_delta" for m in BASE_METRICS]
 )
@@ -277,6 +278,7 @@ def build_features_qb(
     schedules: pl.DataFrame,
     ngs_passing: pl.DataFrame | None = None,
     coaching_changes: pl.DataFrame | None = None,
+    vegas_team: pl.DataFrame | None = None,
     scoring_profile: dict | None = None,
 ) -> pl.DataFrame:
     """Build the QB feature table from already-loaded frames.
@@ -316,6 +318,7 @@ def build_features_qb(
         {"competition_draft_capital": "supporting_cast_capital"}
     )
     out = out.join(supporting_cast, on=["season", "team"], how="left")
+    out = sh.attach_vegas_team(out, vegas_team)
 
     out = out.with_columns(pl.min_horizontal(pl.col("years_exp"), pl.lit(10)).alias("year_in_league"))
     out = sh.add_covid_flag(out)
@@ -339,6 +342,7 @@ def load_and_build(
     draft_picks_path: Path = sh.PATHS["draft_picks"],
     ngs_passing_path: Path = NGS_PASSING_PATH,
     coaching_changes_path: Path = sh.PATHS["coaching_changes"],
+    vegas_team_path: Path = PROCESSED_DIR / "vegas_team.parquet",
     out_path: Path = OUT_PATH,
 ) -> pl.DataFrame:
     """Load every default source from disk and build + write features_qb.parquet."""
@@ -351,6 +355,7 @@ def load_and_build(
     draft_picks = pl.read_parquet(draft_picks_path)
     ngs_passing = pl.read_parquet(ngs_passing_path) if ngs_passing_path.exists() else None
     coaching_changes = sh.load_coaching_changes(coaching_changes_path)
+    vegas_team = pl.read_parquet(vegas_team_path) if vegas_team_path.exists() else None
 
     out = build_features_qb(
         labels=labels,
@@ -362,6 +367,7 @@ def load_and_build(
         schedules=schedules,
         ngs_passing=ngs_passing,
         coaching_changes=coaching_changes,
+        vegas_team=vegas_team,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.write_parquet(out_path)
