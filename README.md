@@ -73,6 +73,35 @@ pbp later, column-restricted, for red zone / end zone share features.
   ranks must filter `season_type == "REG"` or labels silently credit playoff
   production. Locked by a test.
 
+### Market expectation (ADP substitute)
+
+This environment's egress proxy blocks FantasyPros, Sleeper, and every other
+non-GitHub ADP source, so preseason market expectation comes from the
+**dynastyprocess historical FantasyPros ECR archive** (the brief's priority-2
+source): the final preseason PPR consensus snapshot per season, normalized to
+positional rank. Coverage and quality:
+
+- **2020–2025: real market data** (`adp_source=ecr`), snapshot dated 4–7 days
+  before each season's Week 1. 2,842 player-seasons, 100% of each season's
+  top-200 matched to `gsis_id`.
+- **2014–2019: no reachable source.** Phase 2 will label these with the
+  prior-season-finish proxy (`adp_source=proxy`), per the brief's fallback,
+  and they are flagged for sensitivity analysis.
+- **Manual escape hatch:** drop `data/external/adp/<season>.csv` (schema in
+  `data/external/adp/README.md`) to supply real ADP for any season;
+  it takes precedence as `adp_source=manual`.
+
+ECR is consensus *rank*, not literal draft position, but the pipeline uses
+positional rank everywhere precisely so this distinction stays immaterial.
+
+The ID crosswalk resolves external names/ids to nflverse `gsis_id` via a
+three-rung ladder (FantasyPros-id join → exact normalized name+position →
+fuzzy ≥93 with margin). One subtlety worth knowing: `ff_playerids` stamps
+retired players' position as `XX` (current status, not playing position), so
+position is a match *constraint*, never an eligibility filter — filtering
+would silently drop every since-retired player from history. Every fuzzy or
+failed match is logged to `data/id_map_review.csv`, never silently accepted.
+
 ## Ground rules
 
 **Leakage rule (non-negotiable):** every feature predicting season N must be
@@ -87,8 +116,9 @@ Phase 3.
 
 - [x] **Phase 0** — environment, structure, dependency pins
 - [x] **Phase 1a** — nflverse pulls cached, row counts verified per season
-- [ ] **Phase 1d** — ID crosswalk (next, with 1b)
-- [ ] **Phase 1b** — historical ADP acquisition — *gates labeling*
+- [x] **Phase 1d** — ID crosswalk: 100% top-200 match rate, all seasons
+- [x] **Phase 1b** — market expectation: FantasyPros ECR 2020–2025 (real),
+      2014–2019 to be proxy-labeled in Phase 2 — see below
 - [ ] **Phase 1c** — Vegas / The Odds API (paid; out of v1 training features)
 - [ ] **Phase 2** — labels
 - [ ] **Phase 3** — features (WR first)
