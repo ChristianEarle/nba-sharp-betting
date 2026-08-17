@@ -1,0 +1,106 @@
+# Data acquisition config (Phase 1a).
+# Seasons are inclusive. 2013 start gives us 2014+ as usable training rows
+# once year-over-year deltas require a prior season.
+seasons:
+  start: 2013
+  end: 2025
+
+# Datasets pulled from nflverse via nflreadpy.
+# first_available documents when the source actually begins; pulls are clipped
+# to it so we don't request seasons that cannot exist.
+# required=false means the pipeline must run with this dataset absent/null.
+datasets:
+  player_stats:
+    loader: load_player_stats
+    seasonal: true
+    first_available: 1999
+    required: true
+  snap_counts:
+    loader: load_snap_counts
+    seasonal: true
+    first_available: 2012
+    required: true
+  depth_charts:
+    loader: load_depth_charts
+    seasonal: true
+    first_available: 2001
+    required: true
+  rosters:
+    loader: load_rosters
+    seasonal: true
+    first_available: 1999
+    required: true
+  schedules:
+    loader: load_schedules
+    seasonal: true
+    first_available: 1999
+    required: true
+  draft_picks:
+    loader: load_draft_picks
+    seasonal: false
+    first_available: 1980
+    required: true
+  combine:
+    loader: load_combine
+    seasonal: false
+    first_available: 2000
+    required: true
+  players:
+    loader: load_players
+    seasonal: false
+    required: true
+  ff_playerids:
+    loader: load_ff_playerids
+    seasonal: false
+    required: true
+    # nflreadpy hardcodes the github.com/<org>/<repo>/raw/... form of this URL,
+    # which this environment's egress proxy rejects with 403. The canonical
+    # raw.githubusercontent.com host serves the identical file. Same source,
+    # same commit — only the host differs.
+    fallback_csv_url: https://raw.githubusercontent.com/dynastyprocess/data/master/files/db_playerids.csv
+  ff_opportunity:
+    loader: load_ff_opportunity
+    seasonal: true
+    first_available: 2006
+    required: true
+    kwargs:
+      stat_type: weekly
+  ngs_passing:
+    loader: load_nextgen_stats
+    seasonal: true
+    first_available: 2016
+    required: false
+    kwargs:
+      stat_type: passing
+  ngs_receiving:
+    loader: load_nextgen_stats
+    seasonal: true
+    first_available: 2016
+    required: false
+    kwargs:
+      stat_type: receiving
+  ngs_rushing:
+    loader: load_nextgen_stats
+    seasonal: true
+    first_available: 2016
+    required: false
+    kwargs:
+      stat_type: rushing
+  ftn_charting:
+    loader: load_ftn_charting
+    seasonal: true
+    first_available: 2022
+    required: false
+  ff_ecr:
+    loader: load_ff_rankings
+    seasonal: false
+    required: true
+    kwargs:
+      type: all
+    # nflreadpy hardcodes the github.com/<org>/<repo>/raw/... form of this URL,
+    # which this environment's egress proxy rejects with 403. The canonical
+    # raw.githubusercontent.com host serves the identical file. Same source,
+    # same commit — only the host differs. File is large (~39MB, 1.8M rows);
+    # in this environment the loader call itself fails and we always land on
+    # the fallback.
+    fallback_parquet_url: https://raw.githubusercontent.com/dynastyprocess/data/master/files/db_fpecr.parquet
