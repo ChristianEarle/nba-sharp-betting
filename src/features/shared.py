@@ -374,11 +374,18 @@ def player_team_usage(reg: pl.DataFrame) -> pl.DataFrame:
 
 
 def team_usage_totals(reg: pl.DataFrame) -> pl.DataFrame:
-    """season, team -> team_targets, team_carries, team_air_yards (all positions, all rows)."""
+    """season, team -> team_targets, team_carries, team_air_yards, team_rush_yards (all positions, all rows).
+
+    ``team_rush_yards`` (added for QB's rush_yard_share — see
+    ``src.features.qb``) is every rusher's yards on the team, QB scrambles
+    and designed runs included, same "every position, every row" scope as
+    the other three totals.
+    """
     return reg.group_by(["season", "team"]).agg(
         pl.col("targets").sum().alias("team_targets"),
         pl.col("carries").sum().alias("team_carries"),
         pl.col("receiving_air_yards").sum().alias("team_air_yards"),
+        pl.col("rushing_yards").sum().alias("team_rush_yards"),
     )
 
 
@@ -416,8 +423,77 @@ def vacated_shares(reg: pl.DataFrame, season_team: pl.DataFrame) -> pl.DataFrame
     return out.with_columns((pl.col("season") + 1).alias("season"))
 
 
+def safe_div(num: pl.Expr, den: pl.Expr) -> pl.Expr:
+    """num / den, null (not NaN) when den is 0 or null.
+
+    A plain ``num / den`` on a genuine 0/0 (e.g. a special-teamer with 0
+    targets and 0 air yards) yields float NaN, not null — a real
+    correctness bug (NaN survives null-checks, breaks null-rate reporting,
+    and most downstream ML libraries treat it differently from a missing
+    value). Every ratio-shaped feature across ``src.features.wr``/``rb``/
+    ``te``/``qb`` goes through this (WR keeps its own private copy,
+    predating this shared one; behavior is identical).
+    """
+    return pl.when(den == 0).then(None).otherwise(num / den)
+
+
+def reg_with_points(player_stats: pl.DataFrame, profile: dict) -> pl.DataFrame:
+    """REG rows + computed_points, using the src.labels.build scoring formula (imported, not duplicated).
+
+    Position-agnostic — every position's ppr_ppg feature starts here (WR
+    keeps its own private copy, predating this shared one; behavior is
+    identical).
+    """
+    from src.labels.build import compute_weekly_points
+
+    reg = filter_reg(player_stats)
+    return reg.with_columns(compute_weekly_points(reg, profile).alias("computed_points"))
+
+
+def expected_points_total(ff_opportunity: pl.DataFrame, schedules: pl.DataFrame) -> pl.DataFrame:
+    """season, gsis_id -> expected_total: sum of ff_opportunity's total_fantasy_points_exp, REG only.
+
+    Position-agnostic: ``total_fantasy_points_exp`` already blends pass +
+    rush + rec expected points for whichever of those a player's role
+    involves, so this one aggregation serves every position's expected-PPR
+    feature (WR keeps its own private copy, predating this shared one;
+    behavior is identical). ff_opportunity ships no season_type column;
+    REG rows are identified by joining game_id against schedules (verified:
+    every ff_opportunity game_id resolves to a schedules game_type, no
+    unmatched rows).
+    """
+    ff = ff_opportunity.with_columns(pl.col("season").cast(pl.Int64))
+    reg_games = schedules.filter(pl.col("game_type") == "REG").select("game_id")
+    ff_reg = ff.join(reg_games, on="game_id", how="inner").filter(pl.col("player_id").is_not_null())
+    agg = ff_reg.group_by(["season", "player_id"]).agg(
+        pl.col("total_fantasy_points_exp").sum().alias("expected_total")
+    )
+    return agg.rename({"player_id": "gsis_id"})
+
+
+def snap_share_from_counts(snap_counts: pl.DataFrame, rosters: pl.DataFrame) -> pl.DataFrame:
+    """season, gsis_id -> snap_share: mean REG-season offense_pct.
+
+    Position-agnostic (WR keeps its own private copy, predating this
+    shared one; behavior is identical). snap_counts carries no gsis_id,
+    only pfr_player_id; resolved via rosters' own (season, pfr_id, gsis_id)
+    crosswalk. Rows that don't resolve (older/deeper-roster players with no
+    pfr_id on file) are dropped here, not guessed — they simply stay null
+    downstream.
+    """
+    reg = snap_counts.filter(pl.col("game_type") == "REG")
+    xwalk = (
+        rosters.filter(pl.col("pfr_id").is_not_null())
+        .select("season", "pfr_id", "gsis_id")
+        .unique()
+    )
+    j = reg.join(xwalk, left_on=["season", "pfr_player_id"], right_on=["season", "pfr_id"], how="left")
+    j = j.filter(pl.col("gsis_id").is_not_null())
+    return j.group_by(["season", "gsis_id"]).agg(pl.col("offense_pct").mean().alias("snap_share"))
+
+
 # --------------------------------------------------------------------------
-# Team pass volume (N-1)
+# Team pass / rush volume (N-1)
 # --------------------------------------------------------------------------
 
 
@@ -458,18 +534,44 @@ def team_pass_volume_prior(reg: pl.DataFrame) -> pl.DataFrame:
     return out.with_columns((pl.col("season") + 1).alias("season"))
 
 
+def team_rush_volume_prior(reg: pl.DataFrame) -> pl.DataFrame:
+    """season (N), team -> team_rush_att_pg_prior, from season N-1.
+
+    RB's analogue of ``team_pass_volume_prior`` above: season-total carries
+    (every position — a team's rush attempts include QB scrambles/designed
+    runs, not just RB carries) divided by season-total games, then shifted
+    N-1 -> N. Same "sum / sum, not mean-of-weekly-rates" convention so a
+    bye week doesn't distort it.
+    """
+    weekly = reg.group_by(["season", "team", "week"]).agg(pl.col("carries").sum().alias("rush"))
+    season_tot = weekly.group_by(["season", "team"]).agg(
+        pl.len().alias("n_games"), pl.col("rush").sum().alias("rush_sum")
+    )
+    season_tot = season_tot.with_columns(
+        (pl.col("rush_sum") / pl.col("n_games")).alias("team_rush_att_pg_prior")
+    )
+    out = season_tot.select("season", "team", "team_rush_att_pg_prior")
+    return out.with_columns((pl.col("season") + 1).alias("season"))
+
+
 # --------------------------------------------------------------------------
 # Competition draft capital
 # --------------------------------------------------------------------------
 
 
-def competition_draft_capital(draft_picks: pl.DataFrame, position: str) -> pl.DataFrame:
+def competition_draft_capital(draft_picks: pl.DataFrame, position: str | list[str]) -> pl.DataFrame:
     """season (N), team -> competition_draft_capital: sum(max(0, 300 - pick)) for `position` picks.
 
     "Competition" a returning player faces from his own team's season-N
     draft class at his position — entirely a preseason (draft-day) fact.
+
+    ``position`` accepts either a single position code (WR's own-position
+    call) or a list (QB's supporting_cast_capital: draft capital the
+    season-N team spent on WR/TE/RB, i.e. every *other* skill position) —
+    same underlying formula either way, ``.is_in`` subsumes ``==``.
     """
-    dp = draft_picks.filter((pl.col("position") == position) & pl.col("pick").is_not_null())
+    positions = [position] if isinstance(position, str) else list(position)
+    dp = draft_picks.filter(pl.col("position").is_in(positions) & pl.col("pick").is_not_null())
     dp = normalize_team(dp, "team")
     dp = dp.with_columns((pl.lit(UNDRAFTED_PICK) - pl.col("pick")).clip(lower_bound=0).alias("capital"))
     return dp.group_by(["season", "team"]).agg(pl.col("capital").sum().alias("competition_draft_capital"))
