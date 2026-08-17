@@ -88,7 +88,7 @@ import polars as pl
 import xgboost as xgb
 import yaml
 from sklearn.impute import SimpleImputer
-from sklearn.isotonic import IsotonicRegression
+from sklearn.isotonic import IsotonicRegression, isotonic_regression
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
@@ -589,7 +589,109 @@ def apply_calibration(method: str, calibrator, score) -> np.ndarray:
         return calibrator.predict(score)
     if method == "platt":
         return calibrator.predict_proba(score.reshape(-1, 1))[:, 1]
+    if method == "smoothed_isotonic":
+        return calibrator.predict(score)
     raise ValueError(f"unknown calibration method: {method}")
+
+
+# --------------------------------------------------------------------------
+# Laplace-smoothed isotonic calibration (v1.5 -- fixes v1's isotonic
+# terminal-bucket saturation; see README's "Isotonic calibration saturates
+# at the extremes" limitation).
+#
+# Ordinary isotonic regression (``choose_calibration`` above) runs PAVA
+# (pooled-adjacent-violators) on the pooled OOF validation predictions and
+# outputs, per pooled block, the block's raw empirical positive rate
+# (pos/n). At this pool's sample size a terminal block (the highest- or
+# lowest-raw-score pool) can land entirely on one class, giving pos/n
+# exactly 0.0 or 1.0 -- a small-bucket artifact, not model certainty (see
+# ``src/inference/board_2026.py``'s "Displayed-probability clamp" section
+# for the v1 presentation-only workaround this replaces).
+#
+# ``SmoothedIsotonic`` fixes it at the source, not at display time, via
+# the rule of succession: every PAV block's output is (pos+1)/(n+2)
+# instead of pos/n -- Laplace/add-one smoothing, which can never reach
+# exactly 0 or 1 for any finite block. Two-pass construction:
+#
+# 1. ``isotonic_regression`` (sklearn's PAVA primitive, not the
+#    ``IsotonicRegression`` estimator) on the sorted OOF pool gives each
+#    training row its PAV-block-fitted value; consecutive rows sharing an
+#    (near-)identical fitted value are one block. Replace every block's
+#    value with its Laplace-smoothed rate.
+# 2. PAVA guarantees strictly increasing pos/n *means* across adjacent
+#    blocks, but (pos+1)/(n+2) is not guaranteed to preserve that
+#    ordering for arbitrary block sizes (a tiny block near 0 can smooth
+#    to a higher value than a much larger neighboring block whose raw
+#    mean is technically higher but barely so) -- so a second PAVA pass,
+#    run on the block-level smoothed values themselves (weighted by block
+#    size), re-monotonizes the curve. A weighted average of values that
+#    are all already strictly inside (0, 1) can only ever land inside the
+#    span of its inputs, so this second pass cannot reintroduce an exact
+#    0 or 1 either -- monotonicity and de-saturation both hold after it.
+# --------------------------------------------------------------------------
+
+
+class SmoothedIsotonic:
+    """Isotonic regression with Laplace/rule-of-succession-smoothed block outputs.
+
+    Same ``fit``/``predict`` shape as sklearn's ``IsotonicRegression`` (fit
+    on raw pre-calibration blend score + binary label, predict returns a
+    probability in the strict open interval (0, 1)) so it drops into
+    ``apply_calibration``'s existing ``method`` dispatch unchanged. See
+    the module-level comment above this class for the two-pass
+    construction and why it preserves monotonicity while eliminating
+    exact 0/1 output.
+    """
+
+    def __init__(self) -> None:
+        self.x_knots_: np.ndarray | None = None
+        self.y_knots_: np.ndarray | None = None
+        self.n_blocks_: int | None = None
+
+    def fit(self, raw_score, y_true) -> "SmoothedIsotonic":
+        raw_score = np.asarray(raw_score, dtype=float)
+        y_true = np.asarray(y_true, dtype=float)
+        assert len(raw_score) == len(y_true) and len(raw_score) > 0, "fit needs aligned, non-empty arrays"
+
+        order = np.argsort(raw_score, kind="mergesort")
+        x_sorted = raw_score[order]
+        y_sorted = y_true[order]
+
+        fitted = isotonic_regression(y_sorted, y_min=0.0, y_max=1.0, increasing=True)
+
+        block_smoothed, block_n, block_x_repr = [], [], []
+        i, n = 0, len(fitted)
+        while i < n:
+            j = i
+            while j + 1 < n and np.isclose(fitted[j + 1], fitted[i], atol=1e-12):
+                j += 1
+            pos = float(y_sorted[i : j + 1].sum())
+            cnt = j - i + 1
+            block_smoothed.append((pos + 1.0) / (cnt + 2.0))
+            block_n.append(cnt)
+            block_x_repr.append(float(x_sorted[i : j + 1].mean()))
+            i = j + 1
+
+        block_smoothed = np.asarray(block_smoothed, dtype=float)
+        block_n = np.asarray(block_n, dtype=float)
+        # Second PAVA pass: re-monotonize the block-level smoothed values,
+        # weighted by block size -- see class docstring / module comment.
+        monotonic_blocks = isotonic_regression(
+            block_smoothed, sample_weight=block_n, y_min=0.0, y_max=1.0, increasing=True
+        )
+
+        self.x_knots_ = np.asarray(block_x_repr, dtype=float)
+        self.y_knots_ = np.asarray(monotonic_blocks, dtype=float)
+        self.n_blocks_ = len(self.x_knots_)
+        return self
+
+    def predict(self, raw_score) -> np.ndarray:
+        assert self.x_knots_ is not None, "SmoothedIsotonic.predict called before fit"
+        raw_score = np.asarray(raw_score, dtype=float)
+        # Piecewise-linear interpolation between block-representative knots,
+        # clipped at the ends -- the same out_of_bounds="clip" convention
+        # sklearn's IsotonicRegression uses; np.interp does this natively.
+        return np.interp(raw_score, self.x_knots_, self.y_knots_)
 
 
 # --------------------------------------------------------------------------
@@ -821,6 +923,16 @@ def run_full_pipeline(
     calib_method, calibrator, calib_diag = choose_calibration(pooled["breakout"], pooled["pred_blend"])
     pooled["pred_calibrated"] = apply_calibration(calib_method, calibrator, pooled["pred_blend"])
 
+    # ---- v1.5: Laplace-smoothed isotonic, fit alongside (never replacing) the
+    # calibration chosen above -- see SmoothedIsotonic's docstring. Persisted
+    # regardless of which method choose_calibration picked, so a position whose
+    # frozen calibration_method is "platt" still carries a usable
+    # smoothed_calibrator (platt doesn't saturate to exact 0/1 the way isotonic
+    # can, but the pooled OOF is worth keeping consistently across positions).
+    smoothed_calibrator = SmoothedIsotonic().fit(pooled["pred_blend"].to_numpy(), pooled["breakout"].to_numpy())
+    pooled["pred_smoothed"] = smoothed_calibrator.predict(pooled["pred_blend"].to_numpy())
+    pooled_oof_val = pooled[["season", "gsis_id", "pred_blend", "breakout"]].copy()
+
     # ---- regression head (separate: RMSE, own Optuna studies) ----
     lgbm_reg_study = tune_regressor(df, tree_cols, folds, "lgbm", cfg, n_trials_reg, seed)
     xgb_reg_study = tune_regressor(df, tree_cols, folds, "xgb", cfg, n_trials_reg, seed)
@@ -839,6 +951,10 @@ def run_full_pipeline(
         "blend_weights": blend_weights,
         "calibration_method": calib_method,
         "calibrator": calibrator,
+        # v1.5 -- see SmoothedIsotonic; never overwrites/removes calibration_method/calibrator above.
+        "smoothed_calibration_method": "smoothed_isotonic",
+        "smoothed_calibrator": smoothed_calibrator,
+        "pooled_oof_val": pooled_oof_val,
         "lgbm_reg_params": lgbm_reg_study.best_params,
         "xgb_reg_params": xgb_reg_study.best_params,
         "lgbm_reg_final_n_estimators": int(round(np.mean(lgbm_reg_best_iters))),
@@ -900,6 +1016,55 @@ def save_artifacts(spec: PositionSpec, frozen: dict, seed: int, cfg: dict) -> No
     to_save["position"] = spec.position
     payload = {**to_save, **frozen.get("_holdout_models", {}), **frozen.get("_holdout_reg_models", {})}
     joblib.dump(payload, spec.artifact_path)
+
+
+# --------------------------------------------------------------------------
+# v1.5 calibration backfill (no retuning): recompute OOF predictions at an
+# already-saved bundle's frozen hyperparameters and fit SmoothedIsotonic
+# alongside the existing calibrator, in place. Used once to backfill the
+# four v1 bundles (see README's v1.5 section); the v1.5 retrain
+# (run_full_pipeline, above) computes this natively going forward, so this
+# function's only job for a v1.5-trained bundle is a no-op re-derivation.
+# --------------------------------------------------------------------------
+
+
+def backfill_smoothed_calibration(spec: PositionSpec) -> dict:
+    """Recompute pooled OOF validation predictions at a saved bundle's frozen classifier
+
+    hyperparameters (lgbm_params/xgb_params/logistic_C) and frozen blend_weights -- same
+    seed, same folds, zero Optuna, zero retuning -- fit SmoothedIsotonic on the result,
+    and merge it into the bundle file in place. Every existing key (including
+    calibration_method/calibrator, the holdout-retrained models) is left untouched; this
+    only adds smoothed_calibration_method/smoothed_calibrator/pooled_oof_val alongside them.
+    Returns the updated bundle dict (also written back to spec.artifact_path).
+    """
+    bundle = joblib.load(spec.artifact_path)
+    cfg = bundle["cfg"]
+    seed = bundle["seed"]
+    tree_cols = bundle["tree_feature_cols"]
+    logit_cols = bundle["logistic_feature_cols"]
+
+    df = load_modeling_frame(spec.features_path, spec.labels_path, cfg=cfg)
+    folds = validation_folds()
+
+    lgbm_oof, _, _ = classifier_oof(df, tree_cols, folds, "lgbm", bundle["lgbm_params"], seed)
+    xgb_oof, _, _ = classifier_oof(df, tree_cols, folds, "xgb", bundle["xgb_params"], seed)
+    logit_oof, _ = logistic_oof(df, logit_cols, folds, bundle["logistic_C"], seed)
+
+    base = lgbm_oof[["season", "gsis_id", "breakout"]].copy()
+    base["pred_lgbm"] = lgbm_oof["pred"].to_numpy()
+    base = base.merge(xgb_oof[["season", "gsis_id", "pred"]].rename(columns={"pred": "pred_xgb"}), on=["season", "gsis_id"], how="inner")
+    base = base.merge(logit_oof[["season", "gsis_id", "pred"]].rename(columns={"pred": "pred_logistic"}), on=["season", "gsis_id"], how="inner")
+    assert len(base) == len(lgbm_oof), "backfill: pooled OOF rows misaligned across model types"
+    base["pred_blend"] = apply_blend(bundle["blend_weights"], lgbm=base["pred_lgbm"], xgb=base["pred_xgb"], logistic=base["pred_logistic"])
+
+    smoothed = SmoothedIsotonic().fit(base["pred_blend"].to_numpy(), base["breakout"].to_numpy())
+
+    bundle["smoothed_calibration_method"] = "smoothed_isotonic"
+    bundle["smoothed_calibrator"] = smoothed
+    bundle["pooled_oof_val"] = base[["season", "gsis_id", "pred_blend", "breakout"]].copy()
+    joblib.dump(bundle, spec.artifact_path)
+    return bundle
 
 
 # --------------------------------------------------------------------------

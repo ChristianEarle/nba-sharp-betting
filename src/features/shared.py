@@ -560,6 +560,87 @@ def team_rush_volume_prior(reg: pl.DataFrame) -> pl.DataFrame:
 
 
 # --------------------------------------------------------------------------
+# Red-zone / goal-line shares (v1.5, Phase C) -- built from play-by-play
+# (data/raw/pbp.parquet, src.ingest.nflverse's slim 9-column pull; see
+# configs/data.yaml's `pbp` entry). v1 skipped these entirely (no pbp
+# pulled at all -- see README's "Play-by-play is deliberately not pulled"
+# note); pbp is `required: false` and genuinely absent for 2026 (no games
+# played yet) and for any environment that hasn't run the ingest, so
+# every caller of this function must tolerate ``pbp=None`` (see
+# ``src.features.wr.build_raw_stat_table`` / ``src.features.rb`` 's own
+# wiring) -- this function itself is never called with None; callers
+# branch to an all-null column set instead, matching every other optional
+# source in this module (snap_counts, ngs_*).
+# --------------------------------------------------------------------------
+
+
+def redzone_share_table(
+    pbp: pl.DataFrame, team_assign: pl.DataFrame, *, play_col: str, player_col: str, thresholds: dict[str, int]
+) -> pl.DataFrame:
+    """season, gsis_id -> one column per (name, threshold) in ``thresholds``: the player's
+
+    share of his N-1 **primary team's** own red-zone-or-tighter usage inside that yardline
+    threshold -- e.g. ``rz_target_share`` (yardline_100<=20) is the player's red-zone targets
+    divided by his team's total red-zone targets that season, not the player's own share of
+    his season-total targets. Both numerator and denominator use the identical threshold, so
+    a tighter (e.g. <=10, "end-zone-adjacent") name captures a different, tighter-usage slice
+    of the same underlying concept, not just a rescaled version of the wider one.
+
+    ``play_col`` is ``pass_attempt`` (WR/TE, ``player_col="receiver_player_id"``) or
+    ``rush_attempt`` (RB, ``player_col="rusher_player_id"``). ``pbp`` must carry
+    ``season``, ``season_type``, ``posteam``, ``yardline_100`` plus ``play_col``/``player_col``
+    -- exactly the slim 9-column set ``configs/data.yaml``'s ``pbp`` entry pulls.
+
+    Scoped to the N-1 primary team the same way ``src.features.wr``'s ``_shares`` scopes
+    target_share/air_yards_share (see that function + ``team_assignments``' docstring) — a
+    player traded mid-season gets this computed against the team he produced the bulk of his
+    snaps for, not a per-week blend. A player who was on the primary team but had zero
+    qualifying plays inside a given threshold gets an explicit share of 0.0 (not null) — a
+    real "he wasn't targeted/didn't carry inside the red zone," not missing data; a share is
+    null only when the team itself had zero qualifying plays at that threshold all season
+    (the 0/0 case, vanishingly rare for these thresholds but handled via ``safe_div``).
+    """
+    reg = pbp.filter(
+        (pl.col("season_type") == "REG")
+        & (pl.col(play_col) == 1)
+        & pl.col(player_col).is_not_null()
+        & pl.col("yardline_100").is_not_null()
+        & pl.col("posteam").is_not_null()
+    )
+    out: pl.DataFrame | None = None
+    for name, threshold in thresholds.items():
+        sub = reg.filter(pl.col("yardline_100") <= threshold)
+        player_n = (
+            sub.group_by(["season", player_col, "posteam"])
+            .agg(pl.len().alias("n"))
+            .rename({player_col: "gsis_id", "posteam": "team"})
+        )
+        team_n = sub.group_by(["season", "posteam"]).agg(pl.len().alias("team_n")).rename({"posteam": "team"})
+
+        primary = team_assign.select("season", "gsis_id", pl.col("primary_team").alias("team"))
+        scoped = primary.join(player_n, on=["season", "gsis_id", "team"], how="left")
+        scoped = scoped.join(team_n, on=["season", "team"], how="left")
+        scoped = scoped.with_columns(pl.col("n").fill_null(0))
+        scoped = scoped.with_columns(safe_div(pl.col("n"), pl.col("team_n")).alias(name))
+        scoped = scoped.select("season", "gsis_id", name)
+
+        out = scoped if out is None else out.join(scoped, on=["season", "gsis_id"], how="left")
+
+    assert out is not None, "redzone_share_table called with an empty thresholds dict"
+    return out
+
+
+def empty_redzone_share_table(names: list[str]) -> pl.DataFrame:
+    """season, gsis_id -> all-null columns for every name in ``names`` -- pbp-absent fallback,
+
+    same shape ``redzone_share_table`` would produce, matching every other optional-source
+    fallback in this module (snap_counts/ngs_* -> null columns, never a raised error).
+    """
+    schema = {"season": pl.Int64, "gsis_id": pl.Utf8, **{n: pl.Float64 for n in names}}
+    return pl.DataFrame(schema=schema)
+
+
+# --------------------------------------------------------------------------
 # Competition draft capital
 # --------------------------------------------------------------------------
 

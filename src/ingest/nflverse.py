@@ -163,6 +163,23 @@ def pull_dataset(
     if not isinstance(df, pl.DataFrame):
         df = pl.DataFrame(df)
 
+    # Column-restrict IMMEDIATELY after the loader call, before this frame is
+    # written to disk or touched again -- for a dataset like pbp (~370 columns,
+    # multiple GB across 13 seasons), the loader itself has no column-selection
+    # kwarg (verified directly against nflreadpy.load_pbp's signature), so the
+    # full frame exists only transiently in this function's local scope. Only
+    # the slim frame below is ever cached. See configs/data.yaml's `pbp` entry.
+    select_columns = spec.get("select_columns")
+    if select_columns:
+        present = [c for c in select_columns if c in df.columns]
+        missing = [c for c in select_columns if c not in df.columns]
+        if missing:
+            return PullResult(
+                name, None, 0, 0, [], cached=False,
+                error=f"select_columns missing from loader output: {missing}",
+            )
+        df = df.select(present)
+
     # Non-seasonal tables (draft picks, combine) come back full-history; clip
     # them so downstream row counts mean what they say.
     if not spec.get("seasonal", False):

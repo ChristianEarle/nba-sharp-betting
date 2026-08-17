@@ -34,7 +34,8 @@ Column groups in the output
   target_share, air_yards_share, wopr, targets_pg, receptions_pg,
   rec_yards_pg, adot, ppr_ppg, expected_ppr_ppg, efficiency_residual_pg,
   yards_per_reception, td_rate, snap_share (nullable), avg_separation/
-  avg_cushion/catch_percentage (nullable, NGS 2016+)
+  avg_cushion/catch_percentage (nullable, NGS 2016+), rz_target_share/
+  ez_target_share (nullable, v1.5 pbp-derived -- see WR's docstring)
 
 This is the *identical* BASE_METRICS list WR uses — the brief specs "same
 receiving family as WR" for TE, and nothing about tight end usage needs a
@@ -43,8 +44,12 @@ already position-agnostic ratios). The only thing that changes between
 the two modules is the population filter (``position == "TE"``) and the
 competition-draft-capital position argument (TE picks, not WR picks).
 
-Skipped by design (documented per the brief, not implemented here):
-red-zone/goal-line target share (needs play-by-play, deferred), depth
+v1.5 addition (Phase C): rz_target_share/ez_target_share, inherited
+unchanged from ``src.features.wr`` (TE reuses WR's ``BASE_METRICS`` and
+``build_raw_stat_table`` verbatim -- see the module-level import above),
+so no TE-specific pbp wiring was needed beyond passing ``pbp`` through.
+
+Skipped by design (documented per the brief, not implemented here): depth
 chart position (no 2025 depth-chart snapshot available), offensive-line
 continuity (no source in data/raw).
 
@@ -109,15 +114,16 @@ def build_features_te(
     snap_counts: pl.DataFrame | None = None,
     ngs_receiving: pl.DataFrame | None = None,
     coaching_changes: pl.DataFrame | None = None,
+    pbp: pl.DataFrame | None = None,
     scoring_profile: dict | None = None,
 ) -> pl.DataFrame:
     """Build the TE feature table from already-loaded frames.
 
     Same builders as ``src.features.wr.build_features_wr`` (receiving
-    family is identical), swapped to the TE population and TE-scoped
-    competition draft capital. Every argument is a polars DataFrame, not a
-    path — see WR's docstring for why (the leakage test exploits this
-    directly).
+    family is identical, v1.5 pbp-derived rz_target_share/ez_target_share
+    included), swapped to the TE population and TE-scoped competition
+    draft capital. Every argument is a polars DataFrame, not a path — see
+    WR's docstring for why (the leakage test exploits this directly).
     """
     if scoring_profile is None:
         scoring_profile = load_scoring_config()
@@ -126,7 +132,7 @@ def build_features_te(
     team_assign = sh.team_assignments(reg)
 
     raw = build_raw_stat_table(
-        reg, team_assign, ff_opportunity, schedules, snap_counts, rosters, ngs_receiving
+        reg, team_assign, ff_opportunity, schedules, snap_counts, rosters, ngs_receiving, pbp
     )
 
     target = labels.filter((pl.col("position") == POSITION) & (~pl.col("is_rookie"))).select(
@@ -172,6 +178,7 @@ def load_and_build(
     snap_counts_path: Path = sh.PATHS["snap_counts"],
     ngs_receiving_path: Path = NGS_RECEIVING_PATH,
     coaching_changes_path: Path = sh.PATHS["coaching_changes"],
+    pbp_path: Path = RAW_DIR / "pbp.parquet",
     out_path: Path = OUT_PATH,
 ) -> pl.DataFrame:
     """Load every default source from disk and build + write features_te.parquet."""
@@ -185,6 +192,7 @@ def load_and_build(
     snap_counts = pl.read_parquet(snap_counts_path) if snap_counts_path.exists() else None
     ngs_receiving = pl.read_parquet(ngs_receiving_path) if ngs_receiving_path.exists() else None
     coaching_changes = sh.load_coaching_changes(coaching_changes_path)
+    pbp = pl.read_parquet(pbp_path) if pbp_path.exists() else None
 
     out = build_features_te(
         labels=labels,
@@ -197,6 +205,7 @@ def load_and_build(
         snap_counts=snap_counts,
         ngs_receiving=ngs_receiving,
         coaching_changes=coaching_changes,
+        pbp=pbp,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.write_parquet(out_path)
@@ -251,6 +260,8 @@ def main() -> int:
         and "avg_separation" not in c
         and "avg_cushion" not in c
         and "catch_percentage" not in c
+        and "rz_target_share" not in c
+        and "ez_target_share" not in c
     ]
     with pl.Config(tbl_rows=-1, tbl_width_chars=200):
         print(nr.filter(pl.col("column").is_in(core_cols)).pivot("era", index="column", values="null_rate"))

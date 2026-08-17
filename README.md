@@ -5,12 +5,17 @@ fantasy-relevant skill player (QB/RB/WR/TE) it is intended to output a calibrate
 breakout probability, an expected finish-vs-ADP delta, and the SHAP drivers behind
 each call.
 
-> **Status: v1 complete.** nflverse ingest, market expectation, breakout
-> labels, all four positions' features/models (WR/RB/TE/QB), SHAP
-> explainability, and the 2026 breakout board (veteran scoring + a
-> separate rookie heuristic + market overlay) are built. See
-> [Progress](#progress) for verdicts and [Known Limitations](#known-limitations)
-> for what to take with a grain of salt.
+> **Status: v1.5 complete.** v1 (nflverse ingest, market expectation,
+> breakout labels, all four positions' features/models, SHAP
+> explainability, the 2026 breakout board) plus three v1.5 additions: a
+> code-complete Odds API ingest (local run required — this environment's
+> proxy blocks the API), Laplace-smoothed calibration (kills v1's
+> isotonic terminal-bucket saturation), and pbp-derived red-zone/goal-line
+> share features with a full from-scratch retrain of all four position
+> models. See [Progress](#progress) for verdicts, "v1.5: Laplace-smoothed
+> calibration" / "v1.5: pbp red-zone features + retrain" / "v1.5 Odds API"
+> above for what's new, and [Known Limitations](#known-limitations) for
+> what to take with a grain of salt.
 
 ## Setup
 
@@ -79,10 +84,21 @@ Week 1 — see `configs/data.yaml`'s per-dataset `last_available` cap and
 | `ff_opportunity` | 74,731 | 2013–2025 |
 | `ngs_passing / receiving / rushing` | 5,933 / 14,731 / 6,059 | 2016+ |
 | `ftn_charting` | 185,215 | 2022+ |
+| `pbp` (v1.5, 9 columns only) | 628,163 | 2013–2025 |
 
-Play-by-play is deliberately not pulled. Thirteen seasons is multiple GB, and the
-pre-aggregated weekly/NGS/ff_opportunity tables cover Phase 3's needs. Only pull
-pbp later, column-restricted, for red zone / end zone share features.
+v1 deliberately did not pull play-by-play at all: thirteen seasons is multiple
+GB unrestricted, and the pre-aggregated weekly/NGS/ff_opportunity tables
+covered Phase 3's needs. v1.5 pulls it column-restricted for the red-zone/
+end-zone/goal-line share features (`configs/data.yaml`'s `pbp` entry, 9
+columns: season, week, season_type, posteam, yardline_100, pass_attempt,
+rush_attempt, receiver_player_id, rusher_player_id, complete_pass,
+touchdown) — `nflreadpy.load_pbp` has no column-selection kwarg of its own
+(checked directly), so `src.ingest.nflverse.pull_dataset` selects
+immediately after the loader call, before anything touches disk; only the
+slim frame is ever cached. Result on this build: **2.7MB** on disk (well
+under any reasonable budget), 628,163 rows across 2013–2025 (0 for 2026 —
+no games played yet, same `last_available` convention as every other
+games-derived dataset).
 
 ### Known data issues
 
@@ -236,6 +252,79 @@ Run the whole thing with `make board` (score-only) or `make refresh`
 (re-pull the 2026-relevant data first). See `outputs/breakout_board_2026.md`
 for the actual current board.
 
+## v1.5: Laplace-smoothed calibration
+
+Fixes v1's isotonic terminal-bucket saturation (see the "Isotonic
+calibration" note in Known Limitations for what that was). `src.models.
+train.SmoothedIsotonic` replaces each isotonic PAV block's raw empirical
+rate (pos/n — which can be an exact 0.0 or 1.0 for a small terminal
+bucket) with its Laplace/rule-of-succession-smoothed value ((pos+1)/(n+2)),
+then re-monotonizes the block sequence with a second PAVA pass (weighted
+by block size) so ordering is never broken by the smoothing step — see the
+class's docstring in `src/models/train.py` for the full two-pass
+construction and why it can never reintroduce an exact 0 or 1.
+
+Every position's bundle now carries the pooled OOF validation predictions
+(`pooled_oof_val`) plus the smoothed calibrator
+(`smoothed_calibration_method`/`smoothed_calibrator`) **alongside**, not
+instead of, the original `calibration_method`/`calibrator` — nothing was
+deleted. `src/inference/board_2026.py` scores off the smoothed calibrator;
+the `[0.01, 0.95]` display clamp and `probability_saturated` flag from v1
+stay on as a no-op safety net. Verified on this build: **478 → 0** veteran
+rows with an exact pre-clamp 0.0/1.0 calibrated probability, board-wide
+across all four positions (`tests/test_inference.py::test_board_has_zero_saturated_rows_v1_5`;
+per-position strict-(0,1)-and-monotonic checks in
+`tests/test_models_positions.py`).
+
+## v1.5: pbp red-zone features + retrain
+
+v1 skipped play-by-play entirely (see the Data section's `pbp` note).
+v1.5 pulls it column-restricted (9 columns, 2.7MB on disk — see Data
+above) and adds four nullable, N-1-shifted features
+(`src.features.shared.redzone_share_table`):
+
+- **WR/TE**: `rz_target_share` (share of the player's team's own targets
+  inside yardline_100<=20) and `ez_target_share` (the same, <=10,
+  "end-zone-adjacent") — TE inherits these unchanged from WR's
+  `BASE_METRICS`/`build_raw_stat_table` (same receiving family it already
+  shared everything else with).
+- **RB**: `rz_carry_share` (<=20) and `goal_line_carry_share` (<=5), same
+  "share of the team's own usage inside this threshold" definition.
+- **QB**: none, per the brief.
+
+Leakage discipline is identical to every other feature: N-1-shifted
+(season-N rows never read season-N pbp), and structurally tested the same
+way as `player_stats` — `tests/test_features_pbp.py` strips season-2023
+rows out of `pbp` and asserts season-2023 feature rows are byte-identical
+to the full build. Nullable by design: `pbp=None` (never pulled) yields
+null columns, never an error — exercised directly in the same test file,
+and by `src/inference/board_2026.py`'s 2026 population (populated from
+real season-2025 pbp when `pbp.parquet` exists, same N-1-shift convention
+every other feature uses; null only if pbp were absent entirely).
+
+All four positions were retrained from scratch (real Optuna config: 60
+classifier trials + 30 regression trials per model type, same as v1 —
+this is a new model generation, not a re-tune; the v1 holdout verdict
+stands untouched in git history). Holdout (2024+2025 pooled) PR-AUC and
+top-10 precision, v1 vs v1.5, reported plainly — improvements and
+regressions alike, no iteration after seeing these numbers:
+
+| Position | PR-AUC (v1) | PR-AUC (v1.5) | Δ | Top-10 precision (v1) | Top-10 precision (v1.5) | Δ |
+|---|---|---|---|---|---|---|
+| WR | 0.101 | 0.104 | +0.003 | 0.000 | 0.000 | +0.000 |
+| RB | 0.112 | 0.119 | +0.007 | 0.000 | 0.200 | **+0.200** |
+| TE | 0.107 | 0.093 | **−0.014** | 0.100 | 0.200 | +0.100 |
+| QB | 0.167 | 0.167 | +0.000 | 0.200 | 0.200 | +0.000 (no pbp features for QB) |
+
+RB is the clear win (rz/goal-line carry share moved it from "doesn't beat
+baseline on top-10" to beating it on both metrics). TE is a genuine mixed
+result — better top-10 precision, *worse* PR-AUC — reported as-is rather
+than cherry-picked; at TE's holdout sample size (see the small-sample
+caveat below) a couple of ranking flips easily move both metrics this
+much. WR moved only marginally. QB is unchanged (no new features), which
+also serves as an implicit determinism/no-regression check on everything
+*except* the new features.
+
 ## Ground rules
 
 **Leakage rule (non-negotiable):** every feature predicting season N must be
@@ -255,42 +344,44 @@ read from the shipped `fantasy_points_ppr` column. See
 - [x] **Phase 1d** — ID crosswalk: 100% top-200 match rate, all seasons
 - [x] **Phase 1b** — market expectation: FantasyPros ECR 2020–2026 (real),
       2014–2019 proxy-labeled in Phase 2 — see above
-- [ ] **Phase 1c** — Vegas / The Odds API (paid; out of v1 training features
-      — Vegas is overlay-only, see Known Limitations)
+- [x] **Phase 1c (v1.5)** — The Odds API ingest is code-complete
+      (`src/ingest/odds_api.py`, `configs/odds_api.yaml`, see "v1.5 Odds
+      API (local run required)" above) but never executed against the
+      network from this environment (the egress proxy blocks
+      `api.the-odds-api.com`) — still overlay-only, not a training
+      feature, until a local run produces real `data/external/odds_api/`
+      data, see Known Limitations
 - [x] **Phase 2** — labels: `configs/scoring.yaml`, `configs/labels.yaml`,
       `data/processed/labels.parquet` (2014–2025, QB/RB/WR/TE, 6,978 rows)
 - [x] **Phase 3/4 (all four positions)** — feature builders (leakage-tested
       two ways per position: season-N stats stripped ⇒ identical output;
       team context keyed to Week-1 rosters, not final-team rosters) +
       LGBM/XGB/L2-logistic blend, isotonic-calibrated, expanding-window CV
-      (val 2020–2023), one frozen holdout eval (2024–2025) each. Honest
-      verdicts (holdout, pooled 2024+2025, model vs. baseline 2
-      prior-season-ppg-rank — copied verbatim from each position's
-      `outputs/model_{pos}_report.md`; regenerate with `make retrain`):
+      (val 2020–2023), one frozen holdout eval (2024–2025) each. **v1.5
+      retrained all four from scratch** (real Optuna config, not tuning
+      shortcuts) with the new pbp red-zone features added — see "v1.5:
+      pbp red-zone features + retrain" below for the full v1-vs-v1.5
+      comparison. Current (v1.5) verdicts, copied verbatim from each
+      position's `outputs/model_{pos}_report.md` (regenerate with `make
+      retrain`) — these ARE freshly regenerated on this build, fixing v1's
+      stale-decimal caveat (see git history for the exact v1 numbers this
+      superseded):
       - **WR** — DOES NOT beat baseline on top-10 precision (0.000 vs
-        0.000) but BEATS it on PR-AUC (0.101 vs 0.038, +0.063).
-      - **RB** — DOES NOT beat baseline on top-10 precision (0.000 vs
-        0.000) but BEATS it on PR-AUC (0.112 vs 0.028, +0.083).
-      - **TE** — BEATS baseline on both top-10 precision (0.100 vs 0.000,
-        +0.100) and PR-AUC (0.107 vs 0.069, +0.039).
+        0.000) but BEATS it on PR-AUC (0.104 vs 0.038, +0.066).
+      - **RB** — BEATS baseline on both top-10 precision (0.200 vs 0.000,
+        +0.200) and PR-AUC (0.119 vs 0.028, +0.091).
+      - **TE** — BEATS baseline on both top-10 precision (0.200 vs 0.000,
+        +0.200) and PR-AUC (0.093 vs 0.069, +0.024).
       - **QB** — BEATS baseline on both top-10 precision (0.200 vs 0.000,
-        +0.200) and PR-AUC (0.167 vs 0.054, +0.113).
+        +0.200) and PR-AUC (0.167 vs 0.054, +0.113) — unchanged from v1
+        (QB gets no pbp-derived features, per the brief).
 
       Read these with the brief's own honesty rule in mind: holdout
       positives are single digits per position (RB/TE/QB especially — see
       `src/models/train.py`'s "Small-sample caveat" docstring), so a
       handful of hits/misses moves these numbers a lot. Modest, real,
-      uneven lift — not proof of a large edge, and WR/RB's top-10 metric
-      in particular is thin evidence either way at this sample size.
-      **Caveat on these exact numbers:** the `outputs/model_{pos}_report.md`
-      files these are copied from predate this session's changes and were
-      not regenerated here (a full real-Optuna retrain across four
-      positions is expensive — this build's `data/models/*_model_bundle.joblib`
-      were instead used as-is, with only the missing regression-head
-      objects backfilled at their already-frozen hyperparameters, never
-      re-tuned). The directional read (two positions beat the baseline
-      cleanly, two don't on top-10 precision) is almost certainly stable;
-      the exact decimals may drift a little after `make retrain`.
+      uneven lift — not proof of a large edge, and WR's top-10 metric in
+      particular is thin evidence either way at this sample size.
 - [x] **Phase 5** — SHAP explainability: `outputs/shap_{pos}.png` (global
       beeswarm, nonzero-weight tree models) + `--why "Player Name"`
       per-player cards (`src/explain/shap_report.py`)
@@ -302,6 +393,78 @@ read from the shipped `fantasy_points_ppr` column. See
 - [x] **Phase 7** — guardrails + docs: `Makefile` (`refresh` / `retrain` /
       `test` / `board`), `tests/test_inference.py` (golden-player
       regression, board schema, 2026 feature-matrix sanity), this README
+- [x] **v1.5 A — Odds API ingest**: code-complete
+      (`src/ingest/odds_api.py`, `configs/odds_api.yaml`), zero-network
+      tested (`tests/test_odds_api.py`); never executed against the
+      network from this environment (proxy blocks the API) — see "v1.5
+      Odds API (local run required)" below
+- [x] **v1.5 B — Laplace-smoothed calibration**: `src.models.train.SmoothedIsotonic`,
+      backfilled onto the (pre-retrain) v1 bundles then carried forward
+      natively by the v1.5 retrain; board saturated-row count 478 → 0 —
+      see "v1.5: Laplace-smoothed calibration" below
+- [x] **v1.5 C — pbp red-zone features + retrain**: `configs/data.yaml`'s
+      `pbp` entry (9-column slim pull), `src.features.shared.redzone_share_table`,
+      full from-scratch Optuna retrain of all four positions — see "v1.5:
+      pbp red-zone features + retrain" below
+
+## v1.5 Odds API (local run required)
+
+`src/ingest/odds_api.py` + `configs/odds_api.yaml` is Phase 1c's revisit:
+a code-complete ingest for [the-odds-api.com](https://the-odds-api.com)'s
+historical NFL odds, covering preseason team-level lines (h2h/spreads/
+totals, 2020–2025) and a probe for season-long player-futures markets
+(2023+). **This environment's egress proxy blocks
+`api.the-odds-api.com` outright** — verified directly, every request to
+that host fails at the proxy layer before reaching the API — so nothing
+in this module has ever been executed against the network from here.
+`tests/test_odds_api.py` covers it completely (planner math, snapshot-date
+derivation, manifest schema, `--normalize` against a checked-in fixture)
+with zero network calls. **Run the network subcommands locally**, outside
+this proxy, where `api.the-odds-api.com` is reachable.
+
+### Command sequence
+
+```bash
+export ODDS_API_KEY=<your key>                     # required for every subcommand below except --normalize
+
+uv run python -m src.ingest.odds_api --dry-run       # zero network calls: prints every planned request,
+                                                       # key REDACTED, cost per request, projected total
+
+uv run python -m src.ingest.odds_api --verify-futures # ONE historical call, earliest props-era (2023)
+                                                       # snapshot, probes configs/odds_api.yaml's
+                                                       # candidate_futures_markets; ~10 credits
+
+uv run python -m src.ingest.odds_api --pull-team       # featured markets (h2h/spreads/totals), all six
+                                                       # preseason snapshots (2020-2025); ~180 credits
+
+uv run python -m src.ingest.odds_api --pull-props      # props-era snapshots (2023-2025): cheap (one call
+                                                       # per season) if --verify-futures found a season-long
+                                                       # futures key; otherwise refuses unless --allow-expensive
+                                                       # is also passed (falls back to Week-1 event-level
+                                                       # player-prop odds, an order-of-magnitude ~1,920 credits)
+uv run python -m src.ingest.odds_api --pull-props --allow-expensive  # only needed for the expensive fallback
+
+uv run python -m src.ingest.odds_api --normalize      # pure local, no network, no key: raw/*.json ->
+                                                       # data/external/odds_api/team_lines.parquet
+```
+
+Expected costs (against `configs/odds_api.yaml`'s `credit_budget: 3000`):
+**`--verify-futures` ≈10 credits, `--pull-team` ≈180 credits, `--pull-props`
+≈270 credits if a season-long futures key exists (3 props-era seasons x
+the verified market(s)) up to an estimated ~1,920 credits for the
+expensive Week-1 event-props fallback** — every network subcommand reads
+`x-requests-remaining`/`x-requests-used` off every response, prints
+running totals, and hard-aborts *before* any call that would push the
+projected total past `credit_budget` or past the account's own remaining
+quota. Every raw response is written verbatim to
+`data/external/odds_api/raw/<season>_<market>_<snapshot>.json` plus a
+`manifest.json` (redacted URL, timestamp, cost, headers) —
+`data/external/` is git-tracked by an existing `.gitignore` negation, and
+`data/external/odds_api/**` inherits it unchanged (verified with `git
+check-ignore`, locked by `tests/test_odds_api.py::test_raw_json_output_is_git_tracked`),
+so the raw JSON is a real cross-machine contract: pull it locally once,
+commit it, and this environment (or any other) can `--normalize` and use
+it without ever touching the network itself.
 
 ## Known Limitations
 
@@ -316,8 +479,11 @@ read from the shipped `fantasy_points_ppr` column. See
   back in this environment — see "Market expectation" above.
 - **No Vegas data anywhere in training.** The brief scopes Vegas/odds data
   to the overlay only (`data/external/vegas_implied_2026.csv`, optional,
-  manual, presentation-layer); Phase 1c (a live Vegas/Odds-API feed) was
-  never built — it's a paid API this environment can't reach.
+  manual, presentation-layer). v1.5 built the ingest (`src/ingest/odds_api.py`)
+  but it is code-complete, not executed — see "v1.5 Odds API (local run
+  required)" above — this environment's egress proxy blocks
+  `api.the-odds-api.com` outright, a paid API this environment can't
+  reach regardless of the code being ready.
 - **The rookie model is a heuristic, not a Phase-4-grade model.** A single
   shallow L2 logistic on draft capital + combine + landing-team context,
   time-split sanity-checked (not tuned) on ~450–550 historical rookie
@@ -351,15 +517,19 @@ read from the shipped `fantasy_points_ppr` column. See
   `data/external/README.md`) are the intended escape hatch and are empty
   by default — the board's `sleeper_adp_pos_rank`, `adp_gap`, and
   `implied_pts` columns are null until one is supplied.
-- **Isotonic calibration saturates at the extremes.** At this pool size, a
-  position's highest/lowest raw-score OOF bucket can land entirely on one
-  class, which isotonic maps to an exact 0.0 or 1.0 — verified on this
-  build: five 2026 QBs and three 2026 TEs hit an exact 1.000. That's a
-  small-bucket artifact, not model certainty, so `outputs/breakout_board_2026.csv`'s
-  `probability` column is clamped to `[0.01, 0.95]` for display
-  (`probability_saturated` flags which rows hit the boundary pre-clamp;
-  `raw_score`, the pre-calibration blend score, breaks the resulting ties
-  — see `src/inference/board_2026.py`'s module docstring). A principled
-  fix (e.g. Laplace-smoothed isotonic buckets, or a confidence interval
-  instead of a point estimate) needs persisted per-fold OOF predictions
-  and is noted here as a v1.5 follow-up, not built in this pass.
+- **(Fixed in v1.5) Isotonic calibration saturated at the extremes in v1.**
+  At this pool size, a position's highest/lowest raw-score OOF bucket
+  could land entirely on one class, which plain isotonic maps to an exact
+  0.0 or 1.0 — verified on the v1 build: hundreds of veteran rows across
+  all four positions hit an exact 0.0 or 1.0 (mostly the low end). v1.5's
+  `src.models.train.SmoothedIsotonic` fixes this at the source — see "v1.5:
+  Laplace-smoothed calibration" above — rather than only clamping for
+  display; the `[0.01, 0.95]` clamp and `probability_saturated` flag stay
+  on as a no-op safety net (0 rows hit it on this build).
+- **The new pbp red-zone/goal-line share features are nullable, not a
+  requirement.** `configs/data.yaml`'s `pbp` entry is `required: false`
+  and genuinely has 0 rows for the current season (2026, no games played)
+  — every model and the board must and does run fine with them null (see
+  "v1.5: pbp red-zone features + retrain" above); a null rate of
+  ~18-26% on the 2026 population (players with no qualifying 2025
+  red-zone usage, or no 2025 games at all) is expected, not a bug.

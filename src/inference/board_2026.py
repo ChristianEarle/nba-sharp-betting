@@ -71,33 +71,37 @@ market has him going later than ECR's preseason consensus, i.e. a
 possible market inefficiency) is null whenever ``data/external/sleeper_adp_2026.csv``
 is absent.
 
-Displayed-probability clamp (presentation only — no refit, no retune)
-------------------------------------------------------------------------
-Isotonic calibration (every position's frozen ``calibration_method`` as of
-this build) fits a step function over pooled OOF validation predictions;
+Displayed-probability clamp (v1.5: fixed at the source, clamp now a no-op safety net)
+---------------------------------------------------------------------------------------
+v1 scored off each bundle's plain isotonic/Platt ``calibrator``. Isotonic
+regression fits a step function over pooled OOF validation predictions;
 at these sample sizes its terminal buckets (the highest/lowest raw-score
 bucket) can be entirely one class, which isotonic maps to an exact 0.0 or
 1.0 — not evidence of certainty, just a small-bucket artifact. Verified
-directly on this build: five 2026 QBs and three 2026 TEs land on an exact
-1.000 calibrated probability, which (a) reads as false certainty and (b)
-collapses their board ordering to ties. Two presentation-only fixes,
-neither of which touches the classifier, the blend, or the calibrator
-itself:
+directly on the v1 build: hundreds of veteran rows across all four
+positions landed on an exact 0.0 or 1.0 calibrated probability (mostly at
+the low end, where "will not break out" is the overwhelming majority
+class), which (a) reads as false certainty and (b) collapses board
+ordering to ties within a saturated cluster.
 
-- ``probability`` (the board's headline number) is clamped to
-  ``[PROB_DISPLAY_LO, PROB_DISPLAY_HI]`` = ``[0.01, 0.95]`` for display.
-  ``probability_saturated`` (bool) flags every row whose *pre-clamp*
-  calibrated value was exactly 0.0 or 1.0, so a reader can tell "hit the
-  clamp boundary" apart from "genuinely scored near there."
-- ``raw_score`` (the pre-calibration blended classifier score) is kept as
-  a secondary sort key — ``write_board`` sorts by
-  ``(probability desc, raw_score desc)`` within position, so saturated
-  ties still get a real, reproducible ordering instead of an arbitrary one.
+v1.5 fixes this at the source: ``score_veterans_batch`` now calibrates
+through each bundle's ``smoothed_calibrator``
+(``src.models.train.SmoothedIsotonic`` — Laplace/rule-of-succession-
+smoothed isotonic blocks, re-monotonized; see that class's docstring),
+which is constructed so no block can ever output exactly 0.0 or 1.0. The
+old plain ``calibration_method``/``calibrator`` are left in every bundle
+untouched (never deleted) for anything else that still wants them; the
+board just no longer reads them. Two presentation-layer mechanisms from
+v1 are kept as belt-and-suspenders, now expected to be no-ops:
 
-A principled fix (e.g. Laplace-smoothed isotonic buckets, or reporting a
-confidence interval instead of a point estimate) needs persisted
-per-fold OOF predictions and is out of scope for this pass — noted in the
-README as a v1.5 follow-up.
+- ``probability`` is still clamped to ``[PROB_DISPLAY_LO, PROB_DISPLAY_HI]``
+  = ``[0.01, 0.95]`` for display — a safety net, not the fix.
+  ``probability_saturated`` (bool) still flags any row whose *pre-clamp*
+  calibrated value was exactly 0.0 or 1.0; ``main()`` prints (and
+  ``tests/test_inference.py`` asserts) that this is 0 rows on a v1.5 board.
+- ``raw_score`` (the pre-calibration blended classifier score) is still
+  kept as the secondary sort key, in case a future recalibration
+  reintroduces ties.
 """
 
 from __future__ import annotations
@@ -150,24 +154,28 @@ _POSITION_BUILD = {
         "ngs_kwarg": "ngs_receiving",
         "ngs_path": feat_wr.NGS_RECEIVING_PATH,
         "needs_snap": True,
+        "needs_pbp": True,
     },
     "rb": {
         "build_fn": feat_rb.build_features_rb,
         "ngs_kwarg": "ngs_rushing",
         "ngs_path": feat_rb.NGS_RUSHING_PATH,
         "needs_snap": True,
+        "needs_pbp": True,
     },
     "te": {
         "build_fn": feat_te.build_features_te,
         "ngs_kwarg": "ngs_receiving",
         "ngs_path": feat_te.NGS_RECEIVING_PATH,
         "needs_snap": True,
+        "needs_pbp": True,
     },
     "qb": {
         "build_fn": feat_qb.build_features_qb,
         "ngs_kwarg": "ngs_passing",
         "ngs_path": feat_qb.NGS_PASSING_PATH,
         "needs_snap": False,
+        "needs_pbp": False,  # QB gets no pbp-derived features, per the brief (skip QB for Phase C)
     },
 }
 
@@ -186,6 +194,7 @@ ROOKIE_FEATURES_PATH = PROCESSED_DIR / "features_2026_rookies.parquet"
 
 def load_raw_frames() -> dict:
     ff_opportunity_path = RAW_DIR / "ff_opportunity.parquet"
+    pbp_path = RAW_DIR / "pbp.parquet"
     return {
         "player_stats": pl.read_parquet(PLAYER_STATS_PATH),
         "ff_opportunity": pl.read_parquet(ff_opportunity_path),
@@ -200,6 +209,18 @@ def load_raw_frames() -> dict:
         "coaching_changes": sh.load_coaching_changes(),
         "combine": pl.read_parquet(RAW_DIR / "combine.parquet"),
         "market_expectation": pl.read_parquet(MARKET_EXPECTATION_PATH),
+        # v1.5 (Phase C): pbp is required:false and has zero *season-2026* rows by
+        # construction (no games played yet -- see configs/data.yaml's last_available
+        # cap). When pbp.parquet exists, the 2026 board's rz/ez/goal-line share
+        # features are populated from real season-2025 pbp via the same N-1 shift
+        # every other feature uses (identical to player_stats-derived features,
+        # which are likewise "absent for 2026 itself, populated via N-1"). If
+        # pbp.parquet is entirely absent (never pulled, or pulled and then
+        # removed), every rz/ez/goal-line feature -- historical AND 2026 -- is
+        # null: None here exercises that exact pbp-absent code path
+        # src.features.{wr,rb,te} were built against (see their build_raw_stat_table
+        # docstrings), the same "nullable by design" contract as snap_counts/ngs_*.
+        "pbp": pl.read_parquet(pbp_path) if pbp_path.exists() else None,
     }
 
 
@@ -284,6 +305,8 @@ def build_veteran_feature_matrix(pos: str, raw: dict, bundle: dict) -> pl.DataFr
     )
     if spec["needs_snap"]:
         kwargs["snap_counts"] = raw["snap_counts"]
+    if spec["needs_pbp"]:
+        kwargs["pbp"] = raw["pbp"]
     kwargs[spec["ngs_kwarg"]] = raw[spec["ngs_kwarg"]]
 
     out = spec["build_fn"](**kwargs)
@@ -329,7 +352,15 @@ def score_veterans_batch(bundle: dict, df: pd.DataFrame) -> pd.DataFrame:
         preds["logistic"] = model.predict_proba(X)[:, 1]
     nonzero_weights = {k: w for k, w in weights.items() if k in preds}
     blended = train.apply_blend(nonzero_weights, **preds)
-    calibrated_raw = train.apply_calibration(bundle["calibration_method"], bundle["calibrator"], blended)
+    # v1.5: score off the Laplace-smoothed isotonic calibrator (src.models.train.SmoothedIsotonic),
+    # not the raw isotonic/platt one -- see that class's docstring for why (kills the exact-0/1
+    # terminal-bucket saturation the old calibrator produced at this pool size). The old
+    # calibration_method/calibrator are left untouched in the bundle (never deleted), just no
+    # longer read here. PROB_DISPLAY_LO/HI stay on as a no-op safety net below: the smoothed
+    # calibrator is constructed to never hit exactly 0.0 or 1.0 (see SmoothedIsotonic), so the
+    # clamp should not bind on this build -- probability_saturated is still computed and
+    # asserted/reported by the board build below, exactly as before.
+    calibrated_raw = train.apply_calibration(bundle["smoothed_calibration_method"], bundle["smoothed_calibrator"], blended)
 
     lgbm_reg_pred = bundle["lgbm_reg"].predict(df[tree_cols])
     xgb_reg_pred = bundle["xgb_reg"].predict(df[tree_cols])
@@ -413,6 +444,10 @@ _FEATURE_LABELS = {
     "avg_time_to_throw_n1": "time to throw",
     "cpoe_n1": "completion rate over expected",
     "label_season_2020": "the 2020 COVID-era flag",
+    "rz_target_share_n1": "red-zone target share",
+    "ez_target_share_n1": "end-zone-adjacent target share",
+    "rz_carry_share_n1": "red-zone carry share",
+    "goal_line_carry_share_n1": "goal-line carry share",
 }
 
 
@@ -674,6 +709,15 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
 def main() -> int:
     print(f"2026 breakout board | veteran scoring")
     veteran_board = build_veteran_board()
+
+    if not veteran_board.empty:
+        n_saturated = int(veteran_board["probability_saturated"].sum())
+        print(
+            f"v1.5 smoothed-calibration check: {n_saturated} veteran row(s) hit the pre-clamp "
+            f"0.0/1.0 boundary (out of {len(veteran_board)}) -- expected 0 now that scoring uses "
+            "SmoothedIsotonic (src.models.train), which is constructed to never output exactly "
+            "0 or 1. PROB_DISPLAY_LO/HI clamp stays on as a no-op safety net regardless."
+        )
 
     if not veteran_board.empty:
         veteran_board = veteran_board.rename(columns={"expectation_pos_rank": "consensus_pos_rank"})

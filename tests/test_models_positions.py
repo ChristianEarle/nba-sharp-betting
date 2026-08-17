@@ -155,6 +155,72 @@ def test_calibration_method_is_isotonic_or_platt(tiny_result) -> None:
     assert result["calib_method"] in ("isotonic", "platt"), pos
 
 
+# --------------------------------------------------------------------------
+# v1.5 -- Laplace-smoothed isotonic calibration (train.SmoothedIsotonic).
+# --------------------------------------------------------------------------
+
+
+def test_smoothed_calibrator_persisted_alongside_frozen_calibrator(tiny_result) -> None:
+    pos, result = tiny_result
+    frozen = result["frozen"]
+    assert frozen["smoothed_calibration_method"] == "smoothed_isotonic", pos
+    assert isinstance(frozen["smoothed_calibrator"], train.SmoothedIsotonic), pos
+    # The old calibrator is never deleted/overwritten by adding the smoothed one.
+    assert frozen["calibration_method"] in ("isotonic", "platt"), pos
+    assert frozen["calibrator"] is not None, pos
+
+
+def test_pooled_oof_val_is_persisted_and_matches_pooled_validation(tiny_result) -> None:
+    pos, result = tiny_result
+    oof = result["frozen"]["pooled_oof_val"]
+    assert set(["season", "gsis_id", "pred_blend", "breakout"]).issubset(oof.columns), pos
+    assert len(oof) == len(result["pooled_val"]), pos
+    assert not oof["pred_blend"].isna().any(), pos
+
+
+def test_smoothed_calibrator_output_strictly_inside_unit_interval(tiny_result) -> None:
+    """The whole point of SmoothedIsotonic: never an exact 0.0 or 1.0 on the pooled OOF
+
+    it was fit on -- unlike plain isotonic, which can saturate at terminal buckets (see
+    the module docstring in src/models/train.py and README's v1 "Isotonic calibration
+    saturates at the extremes" limitation).
+    """
+    pos, result = tiny_result
+    frozen = result["frozen"]
+    oof = frozen["pooled_oof_val"]
+    smoothed = frozen["smoothed_calibrator"].predict(oof["pred_blend"].to_numpy())
+    assert not np.isnan(smoothed).any(), pos
+    assert (smoothed > 0.0).all(), f"{pos}: smoothed calibrator hit 0.0"
+    assert (smoothed < 1.0).all(), f"{pos}: smoothed calibrator hit 1.0"
+
+
+def test_smoothed_calibrator_is_monotonic_in_raw_score(tiny_result) -> None:
+    pos, result = tiny_result
+    frozen = result["frozen"]
+    oof = frozen["pooled_oof_val"].sort_values("pred_blend")
+    smoothed = frozen["smoothed_calibrator"].predict(oof["pred_blend"].to_numpy())
+    diffs = np.diff(smoothed)
+    assert (diffs >= -1e-12).all(), f"{pos}: smoothed calibrator output is not monotonic non-decreasing"
+
+
+def test_smoothed_isotonic_matches_rule_of_succession_on_a_toy_case() -> None:
+    """Direct unit test of SmoothedIsotonic, independent of any position's data: a raw
+
+    score cleanly separable into two PAV blocks (all-negative low block, all-positive high
+    block) should smooth to (0+1)/(n_lo+2) and (n_hi+1)/(n_hi+2) respectively, never 0 or 1.
+    """
+    raw = np.array([0.1, 0.2, 0.3, 0.8, 0.9, 0.95])
+    y = np.array([0, 0, 0, 1, 1, 1], dtype=float)
+    smoothed = train.SmoothedIsotonic().fit(raw, y)
+    preds = smoothed.predict(raw)
+    assert (preds > 0.0).all() and (preds < 1.0).all()
+    # Monotonic and strictly separates the two blocks (low block < high block).
+    assert preds[:3].max() < preds[3:].min()
+    # Rule of succession on the low (all-negative, n=3) and high (all-positive, n=3) blocks.
+    assert preds[0] == pytest.approx(1.0 / 5.0)
+    assert preds[-1] == pytest.approx(4.0 / 5.0)
+
+
 def test_fold_boundary_respected_in_tiny_run(tiny_result) -> None:
     """Every fold this run actually used respects max(train) < val -- structural, but
 

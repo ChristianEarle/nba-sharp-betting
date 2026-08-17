@@ -163,6 +163,23 @@ def test_board_saturated_rows_flagged_and_ordered_by_raw_score() -> None:
             )
 
 
+def test_board_has_zero_saturated_rows_v1_5() -> None:
+    """v1.5: src.inference.board_2026 scores off train.SmoothedIsotonic (never exactly 0/1
+
+    on the pooled OOF it was fit on -- see tests/test_models_positions.py's
+    test_smoothed_calibrator_output_strictly_inside_unit_interval), so the board's
+    probability_saturated count should be exactly 0 -- a real assertion, not the general
+    robustness check above (which intentionally still tolerates future saturation and
+    just checks it's handled correctly if it ever reappears).
+    """
+    df = _board_df()
+    veterans = df[df["section"] == "veteran"]
+    if veterans.empty:
+        pytest.skip("no veteran rows on the board")
+    n_saturated = int(veterans["probability_saturated"].sum())
+    assert n_saturated == 0, f"expected 0 saturated veteran rows with SmoothedIsotonic, got {n_saturated}"
+
+
 def test_board_rookies_are_flagged_and_separate_from_veterans() -> None:
     df = _board_df()
     sections = set(df["section"].unique())

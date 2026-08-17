@@ -128,6 +128,37 @@ datasets:
     first_available: 2022
     last_available: 2025
     required: false
+  # v1.5 (Phase C): play-by-play, for red-zone/goal-line share features
+  # (src.features.wr's rz_target_share_n1 etc., inherited by TE; src.features.rb's
+  # rz_carry_share_n1/goal_line_carry_share_n1). v1 deliberately skipped pbp
+  # entirely (see README's "Play-by-play is deliberately not pulled" note) --
+  # 13 seasons of full pbp is multiple GB and this pipeline's disk allowance is
+  # fixed. `select_columns` below is applied by src.ingest.nflverse.pull_dataset
+  # IMMEDIATELY after the loader call, before anything is written to disk --
+  # nflreadpy.load_pbp() has no column-selection kwarg of its own (checked
+  # directly against its signature), so the full ~370-column frame exists only
+  # transiently in memory for one pull; only the 9-column slim frame below is
+  # ever cached to data/raw/pbp.parquet. Never widen this list without checking
+  # the resulting file size stays well under the ~200MB budget (see the README's
+  # v1.5 section for the actual size on this build).
+  pbp:
+    loader: load_pbp
+    seasonal: true
+    first_available: 1999
+    last_available: 2025 # no 2026 games played yet
+    required: false
+    select_columns:
+      - season
+      - week
+      - season_type
+      - posteam
+      - yardline_100
+      - pass_attempt
+      - rush_attempt
+      - receiver_player_id
+      - rusher_player_id
+      - complete_pass
+      - touchdown
   ff_ecr:
     loader: load_ff_rankings
     seasonal: false
