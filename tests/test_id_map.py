@@ -10,7 +10,7 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from src.ingest.id_map import PLAYERIDS_PATH, SKILL_POSITIONS, build_id_map, normalize_name
+from src.ingest.id_map import PLAYERIDS_PATH, SKILL_POSITIONS, build_id_map, match_to_gsis, normalize_name
 
 
 @pytest.mark.parametrize(
@@ -104,3 +104,120 @@ def test_xx_position_rows_have_resolvable_gsis_ids() -> None:
     cw = _crosswalk()
     xx_with_gsis = cw.filter((pl.col("position") == "XX") & pl.col("gsis_id").is_not_null())
     assert xx_with_gsis.height > 0, "no XX-position row has a non-null gsis_id"
+
+
+def test_build_id_map_survives_int64_id_columns(tmp_path) -> None:
+    """On a normal machine (no CSV-fallback proxy), ``nfl.load_ff_playerids()``
+
+    schema-infers id columns as Int64. Everything downstream (overrides'
+    ``is_in``/``==`` comparisons, rung-1 lookups) must still work against
+    that dtype exactly as it does against this environment's all-Utf8 CSV
+    fallback — both paths are expected to converge to the same crosswalk.
+    """
+    raw = pl.DataFrame(
+        {
+            "mfl_id": [12459, 99999],
+            "gsis_id": ["00-0031320", None],
+            "fantasypros_id": [None, 5555],
+            "sleeper_id": [111, None],
+            "name": ["Fred Williams", "Some Player"],
+            "position": ["WR", "RB"],
+            "draft_year": ["2014", "2020"],
+            "birthdate": ["1988-04-15", None],
+        }
+    ).with_columns(
+        pl.col("mfl_id").cast(pl.Int64),
+        pl.col("fantasypros_id").cast(pl.Int64),
+        pl.col("sleeper_id").cast(pl.Int64),
+    )
+    playerids_path = tmp_path / "ff_playerids.parquet"
+    raw.write_parquet(playerids_path)
+
+    overrides_path = tmp_path / "id_overrides.csv"
+    overrides_path.write_text(
+        "mfl_id,action,value,name,reason\n12459,clear_gsis,,Fred Williams,test override\n"
+    )
+
+    cw = build_id_map(playerids_path=playerids_path, overrides_path=overrides_path)
+
+    assert cw.schema["mfl_id"] == pl.Utf8
+    assert cw.schema["gsis_id"] == pl.Utf8
+    assert cw.schema["fantasypros_id"] == pl.Utf8
+    assert cw.schema["sleeper_id"] == pl.Utf8
+
+    row = cw.filter(pl.col("mfl_id") == "12459")
+    assert row.height == 1
+    assert row.get_column("gsis_id").to_list() == [None], "Int64 mfl_id override did not apply"
+
+
+def test_match_to_gsis_rung1_hits_across_int64_and_string_id_dtypes(tmp_path) -> None:
+    """Rung 1 must match regardless of which side (crosswalk or source) has
+
+    an integer-typed fantasypros_id and which has a string/float one — the
+    _normalize_id canonicalization has to make all of them converge.
+    """
+    cw = pl.DataFrame(
+        {
+            "mfl_id": ["1"],
+            "gsis_id": ["00-0012345"],
+            "fantasypros_id": [4242],
+            "sleeper_id": ["1"],
+            "name": ["Test Player"],
+            "merge_name": ["test player"],
+            "position": ["WR"],
+            "draft_year": [2018],
+            "birthdate": [None],
+        }
+    ).with_columns(pl.col("fantasypros_id").cast(pl.Int64))
+
+    src = pl.DataFrame(
+        {"player": ["Test Player", "Other Player"], "pos": ["WR", "WR"], "fp_id": ["4242", "4242.0"]}
+    )
+
+    out = match_to_gsis(
+        src,
+        name_col="player",
+        pos_col="pos",
+        fp_id_col="fp_id",
+        crosswalk=cw,
+        review_path=tmp_path / "review.csv",
+    )
+    assert out.get_column("gsis_id").to_list() == ["00-0012345", "00-0012345"]
+    assert out.get_column("match_method").to_list() == ["fantasypros_id", "fantasypros_id"]
+
+
+def test_match_to_gsis_rung1_falls_through_on_null_gsis(tmp_path) -> None:
+    """A crosswalk row that owns the fantasypros_id but has no gsis_id is not
+
+    a match — it must fall through to rungs 2-3 rather than being accepted
+    with a null gsis_id under match_method='fantasypros_id'.
+    """
+    cw = pl.DataFrame(
+        {
+            "mfl_id": ["1"],
+            "gsis_id": [None],
+            "fantasypros_id": ["4242"],
+            "sleeper_id": ["1"],
+            "name": ["Test Player"],
+            "merge_name": ["test player"],
+            "position": ["WR"],
+            "draft_year": [2018],
+            "birthdate": [None],
+        },
+        schema_overrides={"gsis_id": pl.Utf8},
+    )
+    src = pl.DataFrame({"player": ["Test Player"], "pos": ["WR"], "fp_id": ["4242"]})
+
+    out = match_to_gsis(
+        src,
+        name_col="player",
+        pos_col="pos",
+        fp_id_col="fp_id",
+        crosswalk=cw,
+        review_path=tmp_path / "review.csv",
+    )
+    assert out.get_column("gsis_id").to_list() == [None]
+    # Falls through past rung 1 to rung 2 (unique normalized-name match on
+    # the same crosswalk row) — still no gsis_id to offer, but the method
+    # correctly reflects that rung 1's id hit was not accepted as a match.
+    assert out.get_column("match_method").to_list() == ["exact_name"]

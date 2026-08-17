@@ -264,7 +264,11 @@ def main() -> int:
         with pl.Config(tbl_cols=-1, tbl_rows=-1, tbl_width_chars=200):
             print(counts)
 
-    return 1 if any(not r.ok for r in results) else 0
+    # An optional dataset (required: false) failing is a known gap, already
+    # printed above — it must not fail the run for callers (CI, orchestrators)
+    # that gate on exit code.
+    required_failed = [r for r in failed if cfg["datasets"].get(r.name, {}).get("required", False)]
+    return 1 if required_failed else 0
 
 
 if __name__ == "__main__":

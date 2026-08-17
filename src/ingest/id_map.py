@@ -25,7 +25,9 @@ place:
   1. fantasypros_id exact join (when the source carries one — cheap and
      unambiguous, FantasyPros ids are stable). No position constraint: an
      exact id match is an exact id match regardless of what position either
-     side lists.
+     side lists. A crosswalk row that owns the id but has no gsis_id (never
+     backfilled upstream, or an override cleared it) is not a match — it
+     falls through to rungs 2-3 like any other miss.
   2. normalized-name exact join, constrained to the same position, accepted
      only when it resolves to a single crosswalk row (a same-name collision
      at this position falls through rather than guessing). A crosswalk row
@@ -77,6 +79,8 @@ _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 _PUNCT_RE = re.compile(r"[.’']")
 _WS_RE = re.compile(r"\s+")
 
+_ID_COLUMNS = ["mfl_id", "gsis_id", "fantasypros_id", "sleeper_id"]
+
 _REVIEW_COLUMNS = [
     "source_name",
     "normalized_name",
@@ -110,6 +114,30 @@ def normalize_name(name: str | None) -> str:
     if tokens and tokens[-1] in _SUFFIXES:
         tokens = tokens[:-1]
     return " ".join(tokens)
+
+
+def _normalize_id(value: Any) -> str | None:
+    """Canonicalize an id value to a plain digit string regardless of source dtype.
+
+    ``nfl.load_ff_playerids()`` schema-infers id columns as Int64 on a normal
+    (non-proxied) machine; this environment's CSV fallback reads everything
+    as Utf8. A source table's own id column can arrive as either, or as
+    Float64 if it round-tripped through pandas/Excel (12459 -> "12459.0").
+    Every id comparison in this module goes through this function so all of
+    those converge on one representation ("12459") before comparing.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() == "nan":
+        return None
+    try:
+        f = float(s)
+    except ValueError:
+        return s
+    if f.is_integer():
+        return str(int(f))
+    return s
 
 
 def _apply_overrides(df: pl.DataFrame, overrides_path: Path = OVERRIDES_PATH) -> pl.DataFrame:
@@ -149,6 +177,11 @@ def build_id_map(
     want QB/RB/WR/TE-only rows filter ``position`` on the result themselves.
     """
     df = pl.read_parquet(playerids_path)
+    # Converge both loader paths (nflreadpy's Int64-inferred schema and this
+    # environment's all-Utf8 CSV fallback) onto one dtype before anything
+    # else touches these columns — an is_in()/== against a mismatched dtype
+    # raises rather than silently returning false.
+    df = df.with_columns(pl.col(c).cast(pl.Utf8) for c in _ID_COLUMNS if c in df.columns)
     df = _apply_overrides(df, overrides_path)
 
     df = df.with_columns(
@@ -213,7 +246,9 @@ def match_to_gsis(
 
     remaining = set(range(n))
 
-    # Rung 1: fantasypros_id exact join.
+    # Rung 1: fantasypros_id exact join. Both sides go through _normalize_id
+    # so an Int64-inferred crosswalk column (a normal machine, no CSV
+    # fallback) still matches a Utf8 or Float64 probe column.
     if fp_id_col is not None and fp_id_col in df.columns:
         fp_lookup: dict[str, tuple[str | None, str]] = {}
         for fp_id, gid, cname in zip(
@@ -221,16 +256,23 @@ def match_to_gsis(
             cw.get_column("gsis_id").to_list(),
             cw.get_column("name").to_list(),
         ):
-            if fp_id is not None:
-                fp_lookup.setdefault(fp_id, (gid, cname))
+            key = _normalize_id(fp_id)
+            if key is not None:
+                fp_lookup.setdefault(key, (gid, cname))
 
         fp_ids = df.get_column(fp_id_col).to_list()
         for i in list(remaining):
-            fp_id = fp_ids[i]
-            if fp_id is None:
+            key = _normalize_id(fp_ids[i])
+            if key is None:
                 continue
-            hit = fp_lookup.get(str(fp_id))
-            if hit is not None:
+            hit = fp_lookup.get(key)
+            # A crosswalk row can carry a fantasypros_id with no gsis_id
+            # (dynastyprocess never backfilled one, or an override cleared
+            # it) — that's not a match, it's a dead end. Leave the row in
+            # `remaining` so rungs 2-3 get a shot, and if they also miss it
+            # is logged as unmatched below rather than silently accepted
+            # with a null gsis_id.
+            if hit is not None and hit[0] is not None:
                 gsis[i] = hit[0]
                 method[i] = "fantasypros_id"
                 remaining.discard(i)

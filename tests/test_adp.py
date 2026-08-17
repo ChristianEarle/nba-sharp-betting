@@ -11,6 +11,8 @@ import polars as pl
 import pytest
 
 from src.ingest.adp import OUT_PATH, SCHEDULES_PATH
+from src.ingest.adp import _first_reg_dates as _adp_first_reg_dates
+from src.ingest.adp import _load_manual, _rank_snapshot
 
 
 def _df() -> pl.DataFrame:
@@ -22,10 +24,59 @@ def _df() -> pl.DataFrame:
 def _first_reg_dates() -> dict[int, object]:
     if not SCHEDULES_PATH.exists():
         pytest.skip("schedules.parquet not cached; run `python -m src.ingest.nflverse`")
-    sched = pl.read_parquet(SCHEDULES_PATH).filter(pl.col("game_type") == "REG")
-    sched = sched.with_columns(pl.col("gameday").str.to_date())
-    first = sched.group_by("season").agg(pl.col("gameday").min().alias("first_reg"))
-    return dict(zip(first.get_column("season").to_list(), first.get_column("first_reg").to_list()))
+    return _adp_first_reg_dates()
+
+
+def test_rank_snapshot_keeps_all_null_id_rows() -> None:
+    """``unique(subset=[id_col])`` treats every null as equal to every other
+
+    null, so a naive call collapses *all* null-fantasypros_id rows down to
+    one survivor. Two distinct players with no id must both survive.
+    """
+    snap = pl.DataFrame(
+        {
+            "pos": ["WR", "WR", "RB"],
+            "ecr": [50.0, 60.0, 10.0],
+            "id": [None, None, "100"],
+            "player": ["No band leg A", "No band leg B", "Has Id"],
+        }
+    )
+    out = _rank_snapshot(snap, ecr_col="ecr", id_col="id")
+    assert out.height == 3
+    assert out.filter(pl.col("id").is_null()).height == 2
+
+
+def test_rank_snapshot_still_dedupes_non_null_ids() -> None:
+    snap = pl.DataFrame(
+        {
+            "pos": ["WR", "WR"],
+            "ecr": [5.0, 50.0],
+            "id": ["1", "1"],
+            "player": ["Best Row", "Worse Duplicate"],
+        }
+    )
+    out = _rank_snapshot(snap, ecr_col="ecr", id_col="id")
+    assert out.height == 1
+    assert out.get_column("player").item() == "Best Row"
+
+
+def test_load_manual_rejects_bad_position_values(tmp_path, monkeypatch) -> None:
+    import src.ingest.adp as adp_mod
+
+    monkeypatch.setattr(adp_mod, "EXTERNAL_ADP_DIR", tmp_path)
+    (tmp_path / "2099.csv").write_text("player,position,rank\nSome Guy,FLEX,1\n")
+    with pytest.raises(ValueError, match="FLEX"):
+        _load_manual(2099)
+
+
+def test_load_manual_accepts_lowercase_positions(tmp_path, monkeypatch) -> None:
+    import src.ingest.adp as adp_mod
+
+    monkeypatch.setattr(adp_mod, "EXTERNAL_ADP_DIR", tmp_path)
+    (tmp_path / "2099.csv").write_text("player,position,rank\nSome Guy,wr,1\n")
+    out = _load_manual(2099)
+    assert out is not None
+    assert out.get_column("pos").to_list() == ["WR"]
 
 
 def test_exactly_one_snapshot_date_per_season_source() -> None:

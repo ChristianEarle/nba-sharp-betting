@@ -37,7 +37,12 @@ surface as a coverage gap instead of silently vanishing; see
 
 Manual escape hatch: a file at ``data/external/adp/<season>.csv`` (see that
 directory's README for the schema) *replaces* the ECR snapshot for that
-season entirely, with ``adp_source='manual'``.
+season entirely, with ``adp_source='manual'``. ``build_season`` checks for
+this file *before* it needs a first-REG-game date at all, so a manual CSV
+for a season schedules.parquet doesn't cover yet (e.g. 2026, today) is still
+ingested — that asymmetry is intentional: a manually curated file is
+trusted as-is, while the ECR path needs the kickoff date to pick the right
+snapshot out of a season of weekly scrapes.
 
 Seasons 2014-2019 are intentionally absent from this table. The ECR archive
 doesn't reach that far back, and there is no equivalent-quality market
@@ -52,7 +57,7 @@ from pathlib import Path
 
 import polars as pl
 
-from src.ingest.id_map import match_to_gsis, normalize_name, reset_review
+from src.ingest.id_map import build_id_map, match_to_gsis, normalize_name, reset_review
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RAW_DIR = REPO_ROOT / "data" / "raw"
@@ -68,6 +73,11 @@ SKILL_POSITIONS = ["QB", "RB", "WR", "TE"]
 # ECR archive coverage begins here; seasons before this have no usable
 # preseason snapshot regardless of the June-1 window.
 FIRST_SEASON = 2020
+# ECR preseason data for 2026 already exists, but configs/data.yaml's
+# seasons.end is 2025 so schedules.parquet has no 2026 kickoff date to bound
+# the snapshot window against — build_season skips it and says why. Kept at
+# 2026 (not 2025) so Phase 6 picks it up automatically once the 2026
+# schedule is pulled, with no code change needed here.
 LAST_SEASON = 2026
 
 _OUT_COLUMNS = [
@@ -131,9 +141,17 @@ def _snapshot_for_season(ecr: pl.DataFrame, season: int, first_reg) -> pl.DataFr
 
 
 def _rank_snapshot(snap: pl.DataFrame, *, ecr_col: str, id_col: str) -> pl.DataFrame:
-    """Restrict to skill positions, dedupe by id (best ecr wins), assign pos_rank."""
+    """Restrict to skill positions, dedupe by id (best ecr wins), assign pos_rank.
+
+    ``unique(subset=[id_col])`` treats every null as equal to every other
+    null, so a naive call collapses *all* null-id rows down to one survivor.
+    Dedupe only applies where there's an id to dedupe on; null-id rows have
+    nothing to collide over and pass through untouched.
+    """
     snap = snap.filter(pl.col("pos").is_in(SKILL_POSITIONS))
-    snap = snap.sort(ecr_col).unique(subset=[id_col], keep="first")
+    with_id = snap.filter(pl.col(id_col).is_not_null()).sort(ecr_col).unique(subset=[id_col], keep="first")
+    without_id = snap.filter(pl.col(id_col).is_null())
+    snap = pl.concat([with_id, without_id], how="vertical_relaxed").sort(ecr_col)
     snap = snap.with_columns(
         pl.col(ecr_col).rank(method="ordinal").over("pos").cast(pl.Int64).alias("pos_rank")
     )
@@ -148,6 +166,15 @@ def _load_manual(season: int) -> pl.DataFrame | None:
     missing = {"player", "position", "rank"} - set(df.columns)
     if missing:
         raise ValueError(f"data/external/adp/{season}.csv missing columns: {missing}")
+
+    df = df.with_columns(pl.col("position").str.strip_chars().str.to_uppercase())
+    bad = set(df.get_column("position").unique().to_list()) - set(SKILL_POSITIONS)
+    if bad:
+        raise ValueError(
+            f"data/external/adp/{season}.csv has position values outside "
+            f"{SKILL_POSITIONS} (case-insensitive): {sorted(bad)}"
+        )
+
     df = df.with_columns(pl.col("rank").cast(pl.Float64))
     df = df.sort("rank").with_columns(
         pl.col("rank").rank(method="ordinal").over("position").cast(pl.Int64).alias("pos_rank")
@@ -155,7 +182,9 @@ def _load_manual(season: int) -> pl.DataFrame | None:
     return df.rename({"rank": "ecr_overall", "position": "pos"})
 
 
-def build_season(season: int, ecr: pl.DataFrame, first_reg_dates: dict) -> pl.DataFrame | None:
+def build_season(
+    season: int, ecr: pl.DataFrame, first_reg_dates: dict, crosswalk: pl.DataFrame
+) -> pl.DataFrame | None:
     manual = _load_manual(season)
     if manual is not None:
         ranked = manual.with_columns(pl.lit(None, dtype=pl.Date).alias("scrape_date"))
@@ -164,7 +193,11 @@ def build_season(season: int, ecr: pl.DataFrame, first_reg_dates: dict) -> pl.Da
     else:
         first_reg = first_reg_dates.get(season)
         if first_reg is None:
-            print(f"  season {season}: no schedules coverage, skipping")
+            print(
+                f"  season {season}: schedules.parquet has no {season} rows yet — "
+                "extend configs/data.yaml seasons.end and re-run `python -m src.ingest.nflverse` "
+                "once the schedule publishes, skipping"
+            )
             return None
         snap = _snapshot_for_season(ecr, season, first_reg)
         if snap is None:
@@ -183,7 +216,12 @@ def build_season(season: int, ecr: pl.DataFrame, first_reg_dates: dict) -> pl.Da
     )
 
     matched = match_to_gsis(
-        ranked, name_col="player_name", pos_col="position", fp_id_col=fp_id_col, season=season
+        ranked,
+        name_col="player_name",
+        pos_col="position",
+        fp_id_col=fp_id_col,
+        season=season,
+        crosswalk=crosswalk,
     )
 
     return matched.select(
@@ -209,10 +247,11 @@ def build_market_expectation(
     reset_review()
     ecr = _load_ecr_preseason(ecr_path)
     first_reg_dates = _first_reg_dates(schedules_path)
+    crosswalk = build_id_map()  # built once, shared across every season's match_to_gsis call
 
     parts = []
     for season in range(FIRST_SEASON, LAST_SEASON + 1):
-        part = build_season(season, ecr, first_reg_dates)
+        part = build_season(season, ecr, first_reg_dates, crosswalk)
         if part is not None:
             parts.append(part)
 
