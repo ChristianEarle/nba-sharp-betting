@@ -1,0 +1,16 @@
+# Manual corrections to the dynastyprocess ID map (data/raw/ff_playerids.parquet).
+#
+# The upstream map assigns one gsis_id to two different players in a handful of
+# same-name cases. Left alone these fan out joins: a player-season row silently
+# becomes two, and the duplicate carries the wrong player's stats.
+#
+# action:
+#   clear_gsis - blank this row's gsis_id (the row belongs to a different player
+#                than nflverse assigns that id to). Row is kept; it just stops
+#                colliding and falls through to name-matching.
+#   set_gsis   - replace this row's gsis_id with `value`.
+#
+# Keyed on mfl_id because it is the upstream map's own stable primary key.
+# Verify every entry against nflverse player_stats before adding it.
+mfl_id,action,value,name,reason
+12459,clear_gsis,,Fred Williams,"gsis 00-0031320 resolves to Kevin Smith (WR, 2015) in nflverse player_stats; this row is a distinct 2014-era UDFA WR that inherited the id upstream"
