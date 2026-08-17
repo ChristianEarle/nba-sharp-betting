@@ -150,16 +150,24 @@ def _apply_overrides(df: pl.DataFrame, overrides_path: Path = OVERRIDES_PATH) ->
     clears = ov.filter(pl.col("action") == "clear_gsis").get_column("mfl_id").to_list()
     sets = ov.filter(pl.col("action") == "set_gsis")
 
+    # Compare mfl_id as strings on both sides. The CSV side is always Utf8
+    # (infer_schema_length=0 above), but the parquet side's dtype depends on
+    # which source produced it: nflreadpy's own loader yields Int64, the
+    # fallback_parquet_url's file yields Utf8. An Int64-vs-Utf8 is_in matches
+    # nothing, silently skipping every documented override -- caught when a
+    # local (non-proxied) environment pulled via nflreadpy for the first time
+    # and tests/test_ingest.py's duplicate-gsis guard tripped.
+    mfl_as_str = pl.col("mfl_id").cast(pl.Utf8)
     if clears:
         df = df.with_columns(
-            pl.when(pl.col("mfl_id").is_in(clears))
+            pl.when(mfl_as_str.is_in([str(c) for c in clears]))
             .then(None)
             .otherwise(pl.col("gsis_id"))
             .alias("gsis_id")
         )
     for mfl_id, value in zip(sets.get_column("mfl_id").to_list(), sets.get_column("value").to_list()):
         df = df.with_columns(
-            pl.when(pl.col("mfl_id") == mfl_id)
+            pl.when(mfl_as_str == str(mfl_id))
             .then(pl.lit(value))
             .otherwise(pl.col("gsis_id"))
             .alias("gsis_id")

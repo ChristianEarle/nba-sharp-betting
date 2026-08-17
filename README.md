@@ -580,18 +580,31 @@ exercised here since nothing promoted.
   use the player's own prior-season finish rank as `expectation_pos_rank`
   (`adp_source=proxy`) because no reachable ADP archive covers that far
   back in this environment — see "Market expectation" above.
-- **(Superseded by v1.5 Phase C) Vegas data is now in the training matrix,
-  just not in any deployed model.** `implied_ppg`/`implied_win_prob`/
-  `has_vegas` (`src.ingest.vegas`, real 2020–2025 local pull) are joined
-  onto every position's `features_{pos}.parquet`, nullable pre-2020 and
-  wherever unpriced. The binding promotion experiment
-  (`src.models.vegas_experiment`) rejected all four positions (tie or
-  regression on holdout top-10 precision, never an improvement — see
-  "v1.5 Phase C: Vegas team/prop features" above), so
-  `configs/model_{pos}.yaml`'s `excluded_features` keeps them out of
-  every currently-deployed model's trees. The 2026 board's manual
-  `data/external/vegas_implied_2026.csv` overlay hook (presentation-layer
-  only, unrelated to training) is unaffected either way.
+- **Vegas features are acquired and measured — twice, independently — and
+  off by default: they don't help.** (Retires v1.5's "No Vegas data
+  anywhere in training" entry.) The Odds API acquisition ran locally
+  2026-08-17: preseason team lines 2020–2025 plus Week-1 player props are
+  checked in under `data/external/odds_api/` (2,514 credits by the
+  manifest's ledger — the data commit's 1,704 figure undercounted). Two
+  separate evaluations then reached the same verdict:
+  `src.models.vegas_experiment` (frozen v1.5 hyperparameters, one holdout
+  eval per position under the brief's binding promotion rule: all four
+  positions rejected — tie or regression on holdout top-10 precision,
+  never an improvement) and `src/models/ablation_vegas.py` (independent
+  fixed-hyperparameter LGBM A/B authored in a separate local session:
+  no reliable lift anywhere, QB consistently mildly negative, holdout
+  PR-AUC −0.09/−0.13). Shared interpretation: `expectation_pos_rank`
+  (ADP/ECR is itself a market) already prices the Vegas signal, and
+  2020+ coverage leaves early folds learning from nulls. The columns
+  remain in every `features_{pos}.parquet` (nullable;
+  `src.ingest.vegas` + `src/features/vegas.py`), excluded from every
+  deployed model via `configs/model_{pos}.yaml`'s `excluded_features`
+  and absent from the default `make retrain`. Week-1 props (2024–2025
+  plus one 2023 game, measured) sit entirely inside the holdout years —
+  zero trainable rows; raw JSON retained for when future seasons make
+  them trainable. The 2026 board's manual
+  `data/external/vegas_implied_2026.csv` overlay hook (presentation
+  only) is unaffected.
 - **The rookie model is a heuristic, not a Phase-4-grade model.** A single
   shallow L2 logistic on draft capital + combine + landing-team context,
   time-split sanity-checked (not tuned) on ~450–550 historical rookie

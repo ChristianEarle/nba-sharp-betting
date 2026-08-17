@@ -130,7 +130,11 @@ def test_id_map_gsis_ids_are_unique_among_skill_positions() -> None:
     )
     known = _override_mfl_ids()
     if "mfl_id" in df.columns and known:
-        df = df.filter(~pl.col("mfl_id").is_in(known))
+        # Cast to Utf8 before comparing: the parquet's mfl_id dtype varies by
+        # source (nflreadpy loader -> Int64, fallback URL -> Utf8) while the
+        # overrides CSV always reads as strings -- same dtype hazard fixed in
+        # src.ingest.id_map._apply_overrides.
+        df = df.filter(~pl.col("mfl_id").cast(pl.Utf8).is_in([str(k) for k in known]))
 
     dupes = df.group_by("gsis_id").len().filter(pl.col("len") > 1).get_column("gsis_id").to_list()
     assert not dupes, (
