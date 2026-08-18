@@ -105,3 +105,9 @@ dashboard-build:
 dashboard: dashboard-build
 	@echo ">> dashboard: serving outputs/dashboard/ at http://localhost:8787"
 	uv run python -m http.server 8787 -d outputs/dashboard
+
+# Publish the built dashboard to docs/ (served by GitHub Pages once enabled:
+# repo Settings -> Pages -> Deploy from a branch -> main, /docs).
+dashboard-publish: dashboard-build
+	cp outputs/dashboard/index.html docs/index.html
+	@echo "docs/index.html updated -- commit and push to update the live site"
