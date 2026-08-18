@@ -331,36 +331,56 @@ def build_veteran_feature_matrix(pos: str, raw: dict, bundle: dict) -> pl.DataFr
 
 
 def score_veterans_batch(bundle: dict, df: pd.DataFrame) -> pd.DataFrame:
-    """Attaches `probability` (calibrated, clamped for display), `raw_score` (the
+    """Attaches `probability_calibrated_raw` (Platt-calibrated, un-renormalized), `raw_score`
 
-    pre-calibration blended classifier score), `probability_saturated` (bool: the
-    pre-clamp calibrated value was exactly 0.0 or 1.0 -- an isotonic terminal-bucket
-    artifact at this sample size, not model certainty -- see module docstring's
-    "Displayed-probability clamp" section), and `expected_rank_delta` to every row.
+    (the pre-calibration ENSEMBLE blended classifier score -- see below), `probability`
+    (the v1.7 base-rate-renormalized display probability, attached later by
+    ``attach_renormalized_probability`` once every position's frame is on hand),
+    `probability_saturated` (bool safety-net flag, expected to stay 0 -- see "Honest
+    probabilities" below), and `expected_rank_delta` to every row.
+
+    v1.7 seed ensemble + Platt (replaces v1.5's SmoothedIsotonic as the active method):
+    ``bundle["per_seed_models"]`` carries one LGBM+XGB pair per Optuna seed
+    (``src.models.train``'s ``optuna.seeds``), each blended with that seed's own frozen
+    ``bundle["per_seed"][seed]["blend_weights"]`` against the ONE shared logistic head
+    (``bundle["logistic"]``); ``raw_score`` is the mean of those per-seed blended scores
+    (mirrors ``src.models.train.holdout_predictions`` exactly). ``bundle["active_calibrator"]``
+    (Platt, sigmoid, strictly monotone) turns that into ``probability_calibrated_raw`` --
+    monotone means the calibrated ranking is identical to the raw ranking by construction,
+    unlike v1.5's isotonic-family calibrators (piecewise-constant, ties within a block).
+    The final displayed ``probability`` is a separate presentation-layer renormalization
+    (see ``attach_renormalized_probability``'s docstring) applied after every position is
+    scored, not part of this function.
     """
     tree_cols = bundle["tree_feature_cols"]
-    weights = bundle["blend_weights"]
-    preds = {}
-    if weights.get("lgbm", 0) > 0:
-        preds["lgbm"] = bundle["lgbm"].predict_proba(df[tree_cols])[:, 1]
-    if weights.get("xgb", 0) > 0:
-        preds["xgb"] = bundle["xgb"].predict_proba(df[tree_cols])[:, 1]
-    if weights.get("logistic", 0) > 0:
-        model, imputer, scaler = bundle["logistic"]
-        logit_cols = bundle["logistic_feature_cols"]
-        X = scaler.transform(imputer.transform(df[logit_cols]))
-        preds["logistic"] = model.predict_proba(X)[:, 1]
-    nonzero_weights = {k: w for k, w in weights.items() if k in preds}
-    blended = train.apply_blend(nonzero_weights, **preds)
-    # v1.5: score off the Laplace-smoothed isotonic calibrator (src.models.train.SmoothedIsotonic),
-    # not the raw isotonic/platt one -- see that class's docstring for why (kills the exact-0/1
-    # terminal-bucket saturation the old calibrator produced at this pool size). The old
-    # calibration_method/calibrator are left untouched in the bundle (never deleted), just no
-    # longer read here. PROB_DISPLAY_LO/HI stay on as a no-op safety net below: the smoothed
-    # calibrator is constructed to never hit exactly 0.0 or 1.0 (see SmoothedIsotonic), so the
-    # clamp should not bind on this build -- probability_saturated is still computed and
-    # asserted/reported by the board build below, exactly as before.
-    calibrated_raw = train.apply_calibration(bundle["smoothed_calibration_method"], bundle["smoothed_calibrator"], blended)
+    # Backward compatibility: a pre-v1.7 (single-model) bundle, or one built by a
+    # module out of this task's scope (src.models.overlay_backtest, which loads a saved
+    # bundle and calls this function directly), may not carry "per_seed_models" /
+    # "active_calibrator" at all -- fall back to a synthetic single-seed ensemble (the
+    # legacy bundle["lgbm"]/["xgb"]/["blend_weights"]) and the legacy calibrator as
+    # "active", exactly the same fallback src.models.train.holdout_predictions applies.
+    per_seed_models = bundle.get("per_seed_models") or {bundle.get("seed", 0): {"lgbm": bundle["lgbm"], "xgb": bundle["xgb"]}}
+    per_seed_weights = bundle.get("per_seed") or {bundle.get("seed", 0): {"blend_weights": bundle["blend_weights"]}}
+    active_calibration_method = bundle.get("active_calibration_method", bundle.get("calibration_method"))
+    active_calibrator = bundle.get("active_calibrator", bundle.get("calibrator"))
+
+    seed_scores = []
+    for seed, models in per_seed_models.items():
+        weights = per_seed_weights[seed]["blend_weights"]
+        preds = {}
+        if weights.get("lgbm", 0) > 0:
+            preds["lgbm"] = models["lgbm"].predict_proba(df[tree_cols])[:, 1]
+        if weights.get("xgb", 0) > 0:
+            preds["xgb"] = models["xgb"].predict_proba(df[tree_cols])[:, 1]
+        if weights.get("logistic", 0) > 0:
+            model, imputer, scaler = bundle["logistic"]
+            logit_cols = bundle["logistic_feature_cols"]
+            X = scaler.transform(imputer.transform(df[logit_cols]))
+            preds["logistic"] = model.predict_proba(X)[:, 1]
+        nonzero_weights = {k: w for k, w in weights.items() if k in preds}
+        seed_scores.append(train.apply_blend(nonzero_weights, **preds))
+    blended = np.mean(np.vstack(seed_scores), axis=0)
+    calibrated_raw = train.apply_calibration(active_calibration_method, active_calibrator, blended)
 
     lgbm_reg_pred = bundle["lgbm_reg"].predict(df[tree_cols])
     xgb_reg_pred = bundle["xgb_reg"].predict(df[tree_cols])
@@ -368,9 +388,126 @@ def score_veterans_batch(bundle: dict, df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["raw_score"] = blended
     out["probability_saturated"] = (np.isclose(calibrated_raw, 0.0) | np.isclose(calibrated_raw, 1.0)).astype(int)
-    out["probability"] = np.clip(calibrated_raw, PROB_DISPLAY_LO, PROB_DISPLAY_HI)
+    out["probability_calibrated_raw"] = np.clip(calibrated_raw, PROB_DISPLAY_LO, PROB_DISPLAY_HI)
+    # Legacy alias: callers that use this function standalone, without the board-level
+    # renormalization pass (src.models.overlay_backtest -- out of this task's scope to
+    # rewrite) read `probability` and expect the pre-renormalization calibrated value,
+    # exactly the v1.5 contract. build_veteran_board's real board pipeline overwrites
+    # this column with the renormalized display value via attach_renormalized_probability
+    # once every position's frame is on hand.
+    out["probability"] = out["probability_calibrated_raw"]
     out["expected_rank_delta"] = (lgbm_reg_pred + xgb_reg_pred) / 2.0
     return out
+
+
+# --------------------------------------------------------------------------
+# v1.7: base-rate renormalization (board/inference time; replaces v1.5's
+# "displayed-probability clamp" / SmoothedIsotonic write-up -- see this
+# module's docstring's "Honest probabilities" section for why).
+#
+# A calibrated probability (even Platt's, even SmoothedIsotonic's) is only
+# ever calibrated against the historical OOF validation pool it was fit on
+# -- nothing forces the SUM of a position's 2026 calibrated probabilities to
+# equal how many breakouts that position typically produces in a season.
+# Verified directly: pre-renormalization, several positions' veteran pools
+# summed to 2-3x their historical per-season breakout count, which reads as
+# systematically overconfident even though every individual probability is
+# a legitimate calibrated (and, since v1.7, strictly rank-preserving) output.
+#
+# The fix is a per-position linear rescale at *board* time, never touching
+# either model: scale = historical_mean_breakouts / sum(calibrated p over
+# that position's scored 2026 veterans); displayed_probability =
+# min(0.97, p * scale). This is presentation-layer only (same spirit as the
+# old clamp it replaces) -- ``probability_calibrated_raw`` (pre-rescale) and
+# ``raw_score`` (pre-calibration) are both still stored, so nothing is lost,
+# and because the rescale is a single positive per-position constant it
+# cannot change within-position ranking (it can only shrink or grow every
+# probability in that position by the same factor, then the 0.97 cap can
+# only ever bind for the top of the pool).
+# --------------------------------------------------------------------------
+
+# Displayed-probability cap (post-renormalization safety net -- a rescale
+# could in principle push an already-near-1.0 probability slightly past a
+# believable ceiling; capped, not clamped from below, since renormalization
+# is expected to shrink most positions, not inflate them).
+PROB_DISPLAY_CAP = 0.97
+
+# Tier multiples (v1.7): base rate for a position = historical_mean_breakouts
+# / n_scored_2026_veterans at that position (a probability, not a count --
+# "if you drafted every scored veteran at this position, what fraction would
+# break out"). A player's tier is their displayed probability's multiple of
+# that number -- "N times a normal late pick's odds" -- not a fixed absolute
+# cutoff, so it stays meaningful across positions with very different base
+# rates (QB's is much higher than TE's, historically).
+TIER_THRESHOLDS = (
+    (8.0, "Elite target"),
+    (4.0, "Strong swing"),
+    (2.0, "Worth a flier"),
+)
+TIER_FALLBACK = "Long shot"
+
+
+def historical_mean_breakouts_by_position() -> dict[str, float]:
+    """{position: mean per-season breakout count, 2014-2025} from labels.parquet --
+
+    computed fresh every call, never hardcoded (see module docstring's
+    "Honest probabilities" section). Every (position, season) pair in
+    labels.parquet's season range counts toward the mean, including a
+    season with zero breakouts at that position -- dropping zero-breakout
+    seasons would inflate the mean.
+    """
+    labels = pl.read_parquet(train.LABELS_PATH)
+    counts = (
+        labels.filter(pl.col("breakout") == 1)
+        .group_by(["position", "season"])
+        .agg(pl.len().alias("n"))
+    )
+    grid = labels.select("position").unique().join(labels.select("season").unique(), how="cross")
+    full = grid.join(counts, on=["position", "season"], how="left").with_columns(pl.col("n").fill_null(0))
+    means = full.group_by("position").agg(pl.col("n").mean().alias("mean_breakouts"))
+    return {row["position"]: float(row["mean_breakouts"]) for row in means.to_dicts()}
+
+
+def _tier_for_multiple(multiple: float) -> str:
+    if pd.isna(multiple):
+        return TIER_FALLBACK
+    for threshold, label in TIER_THRESHOLDS:
+        if multiple >= threshold:
+            return label
+    return TIER_FALLBACK
+
+
+def attach_renormalized_probability(board: pd.DataFrame, mean_breakouts: dict[str, float]) -> pd.DataFrame:
+    """Per position: scale so displayed probabilities sum to that position's historical
+
+    mean per-season breakout count, cap at ``PROB_DISPLAY_CAP``, and attach a base-rate-
+    multiple tier -- see the module-level "v1.7: base-rate renormalization" comment above
+    for the full rationale. Adds ``probability`` (displayed), ``renorm_scale``,
+    ``base_rate`` (position's implied per-player breakout probability = mean_breakouts /
+    n_scored), ``base_rate_multiple`` (``probability / base_rate``), and ``tier``.
+    """
+    board = board.copy()
+    for col in ("probability", "renorm_scale", "base_rate", "base_rate_multiple"):
+        board[col] = np.nan
+    board["tier"] = TIER_FALLBACK
+
+    for pos in board["pos"].unique():
+        mask = (board["pos"] == pos).to_numpy()
+        raw_p = board.loc[mask, "probability_calibrated_raw"]
+        total_raw = float(raw_p.sum())
+        n_scored = int(mask.sum())
+        target = mean_breakouts.get(pos, np.nan)
+        scale = (target / total_raw) if (total_raw > 0 and pd.notna(target)) else 1.0
+        displayed = np.minimum(PROB_DISPLAY_CAP, raw_p * scale)
+        base_rate = (target / n_scored) if (n_scored > 0 and pd.notna(target)) else np.nan
+
+        board.loc[mask, "renorm_scale"] = scale
+        board.loc[mask, "probability"] = displayed
+        board.loc[mask, "base_rate"] = base_rate
+        multiple = displayed / base_rate if base_rate and base_rate > 0 else pd.Series(np.nan, index=displayed.index)
+        board.loc[mask, "base_rate_multiple"] = multiple
+        board.loc[mask, "tier"] = multiple.apply(_tier_for_multiple)
+    return board
 
 
 def attach_shap_drivers(bundle: dict, df: pd.DataFrame) -> pd.DataFrame:
@@ -580,7 +717,15 @@ def build_veteran_board() -> pd.DataFrame:
         ]
         rows.append(scored)
         print(f"  {pos}: scored {len(scored)} veterans")
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+    if not rows:
+        return pd.DataFrame()
+    combined = pd.concat(rows, ignore_index=True)
+    # v1.7: per-position base-rate renormalization -- needs every position's rows on
+    # hand at once (the scale is sum-over-position), so it runs after the concat, not
+    # inside the per-position loop above. See attach_renormalized_probability's docstring.
+    mean_breakouts = historical_mean_breakouts_by_position()
+    combined = attach_renormalized_probability(combined, mean_breakouts)
+    return combined
 
 
 def build_rookie_board() -> pd.DataFrame:
@@ -624,14 +769,16 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
     veteran_cols = [
-        "player_name", "pos", "age", "team", "probability", "raw_score", "probability_saturated",
+        "player_name", "pos", "age", "team", "probability", "probability_calibrated_raw", "raw_score",
+        "tier", "base_rate_multiple", "base_rate", "probability_saturated",
         "expected_rank_delta", "consensus_pos_rank", "adp", "sleeper_adp_pos_rank", "adp_gap",
         "implied_pts", "edge", "availability", "shap_top3", "rationale",
     ]
     v = veteran_board.copy()
     if not v.empty:
-        # raw_score (pre-calibration blend score) is the tiebreaker for saturated
-        # probability ties (see module docstring's "Displayed-probability clamp").
+        # raw_score (pre-calibration blend score) is the tiebreaker for ties -- the
+        # per-position renormalization scale is a single positive constant, so it
+        # cannot change within-position ordering; this tiebreak is belt-and-suspenders.
         v = v.sort_values(["pos", "probability", "raw_score"], ascending=[True, False, False])
     for c in veteran_cols:
         if c not in v.columns:
@@ -659,11 +806,15 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
     lines.append("probability scale as the veteran model — see the README's Known Limitations section.")
     lines.append("")
     lines.append(
-        f"> **Note:** veteran `probability` is clamped to [{PROB_DISPLAY_LO:.2f}, {PROB_DISPLAY_HI:.2f}] for "
-        "display — isotonic calibration saturates to an exact 0/1 in terminal OOF buckets at this sample size, "
-        "which is a small-bucket artifact, not model certainty. `probability_saturated=1` flags a row that hit "
-        "that boundary pre-clamp; `raw_score` (the pre-calibration blend score) breaks the resulting ties and is "
-        "the real ordering signal among saturated rows — see `src/inference/board_2026.py`'s module docstring."
+        "> **Note (v1.7):** veteran `probability` is renormalized per position so it sums to that "
+        "position's historical mean per-season breakout count (`probability_calibrated_raw * renorm_scale`, "
+        f"capped at {PROB_DISPLAY_CAP:.2f}) — a calibrated probability is only ever calibrated against its own "
+        "validation pool, nothing forces a position's probabilities to sum to how many breakouts that position "
+        "actually produces in a season, and pre-renormalization they didn't (see README). `probability_calibrated_raw` "
+        "(pre-rescale, Platt-calibrated) and `raw_score` (pre-calibration) are both kept alongside it; the rescale is "
+        "a single positive per-position constant, so it cannot change within-position ranking. `tier` is this "
+        "probability's multiple of the position's base rate (`base_rate` = historical mean breakouts / players scored "
+        "at that position this year) — Elite target (8x+), Strong swing (4-8x), Worth a flier (2-4x), Long shot (under 2x)."
     )
     lines.append("")
     lines.append("## Veterans")
@@ -674,11 +825,15 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
             continue
         lines.append(f"### {pos}")
         lines.append("")
-        headers = ["Player", "Age", "Team", "Probability", "Raw score", "Saturated", "Exp. rank Δ", "Consensus (ECR)", "Sleeper ADP", "ADP gap", "Vegas implied", "Edge", "Availability", "Top drivers", "Rationale"]
+        headers = [
+            "Player", "Age", "Team", "Probability", "Tier", "Base-rate x", "Raw calibrated", "Raw score",
+            "Exp. rank Δ", "Consensus (ECR)", "Sleeper ADP", "ADP gap", "Vegas implied", "Edge", "Availability",
+            "Top drivers", "Rationale",
+        ]
         rows = [
             [
-                row["player_name"], row["age"], row["team"], row["probability"], row["raw_score"],
-                int(row["probability_saturated"]) if pd.notna(row["probability_saturated"]) else "",
+                row["player_name"], row["age"], row["team"], row["probability"], row["tier"],
+                row["base_rate_multiple"], row["probability_calibrated_raw"], row["raw_score"],
                 row["expected_rank_delta"], row["consensus_ecr_pos_rank"], row["sleeper_adp_pos_rank"],
                 row["adp_gap"], row["implied_pts"], row["edge"], row["availability"], row["shap_top3"], row["rationale"],
             ]
@@ -713,11 +868,18 @@ def main() -> int:
     if not veteran_board.empty:
         n_saturated = int(veteran_board["probability_saturated"].sum())
         print(
-            f"v1.5 smoothed-calibration check: {n_saturated} veteran row(s) hit the pre-clamp "
-            f"0.0/1.0 boundary (out of {len(veteran_board)}) -- expected 0 now that scoring uses "
-            "SmoothedIsotonic (src.models.train), which is constructed to never output exactly "
-            "0 or 1. PROB_DISPLAY_LO/HI clamp stays on as a no-op safety net regardless."
+            f"v1.7 calibration check: {n_saturated} veteran row(s) hit the pre-clamp 0.0/1.0 "
+            f"boundary (out of {len(veteran_board)}) -- expected 0 now that scoring uses Platt "
+            "(src.models.train.fit_platt) on the seed-ensemble OOF score. PROB_DISPLAY_LO/HI "
+            "clamp stays on as a no-op safety net regardless."
         )
+        for pos in sorted(veteran_board["pos"].unique()):
+            sub = veteran_board[veteran_board["pos"] == pos]
+            print(
+                f"  {pos}: renorm_scale={sub['renorm_scale'].iloc[0]:.3f}, "
+                f"sum(displayed probability)={sub['probability'].sum():.2f}, "
+                f"base_rate={sub['base_rate'].iloc[0]:.4f} (n={len(sub)})"
+            )
 
     if not veteran_board.empty:
         veteran_board = veteran_board.rename(columns={"expectation_pos_rank": "consensus_pos_rank"})

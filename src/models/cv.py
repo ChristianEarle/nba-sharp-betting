@@ -34,6 +34,15 @@ VALIDATION_SEASONS: tuple[int, ...] = (2020, 2021, 2022, 2023)
 # function in this module accepts a season list that could include these.
 HOLDOUT_SEASONS: tuple[int, ...] = (2024, 2025)
 
+# v1.7 (proxy-era sensitivity, configs/model_{pos}.yaml's train_season_start):
+# a fold needs at least this many training seasons to be usable at all --
+# below it a single training year is too thin to fit anything meaningful.
+# Only bites when train_start_season is pushed later than the default 2014
+# (e.g. 2020, the "real-market-only" pool) -- with the default start every
+# fold already has 6+ training seasons, so this is a no-op for every
+# position that keeps the full 2014-2025 pool.
+MIN_FOLD_TRAIN_YEARS = 2
+
 
 @dataclass(frozen=True)
 class Fold:
@@ -66,16 +75,25 @@ class HoldoutSplit:
 
 
 def validation_folds(train_start_season: int = TRAIN_START_SEASON) -> list[Fold]:
-    """The four tuning-path folds: (train <=2019 -> val 2020), ..., (train <=2022 -> val 2023).
+    """The tuning-path folds: (train <=2019 -> val 2020), ..., (train <=2022 -> val 2023)
+    at the default ``train_start_season`` (2014) -- all four ``VALIDATION_SEASONS``.
 
     ``train_start_season`` only controls how far back training seasons go;
     it cannot push a fold's ``val_season`` into ``HOLDOUT_SEASONS`` because
-    ``VALIDATION_SEASONS`` is fixed, not a parameter.
+    ``VALIDATION_SEASONS`` is fixed, not a parameter. A ``val_season`` whose
+    training window (``train_start_season..val_season-1``) would have fewer
+    than ``MIN_FOLD_TRAIN_YEARS`` seasons is skipped rather than raising --
+    a later ``train_start_season`` (e.g. 2020, the proxy-era-sensitivity
+    real-market-only pool) legitimately yields fewer, later-starting folds
+    (val 2022, 2023 only) instead of crashing on an empty/one-year window.
     """
-    return [
-        Fold(train_seasons=tuple(range(train_start_season, val_season)), val_season=val_season)
-        for val_season in VALIDATION_SEASONS
-    ]
+    folds = []
+    for val_season in VALIDATION_SEASONS:
+        train_seasons = tuple(range(train_start_season, val_season))
+        if len(train_seasons) < MIN_FOLD_TRAIN_YEARS:
+            continue
+        folds.append(Fold(train_seasons=train_seasons, val_season=val_season))
+    return folds
 
 
 def holdout_split(train_start_season: int = TRAIN_START_SEASON) -> HoldoutSplit:

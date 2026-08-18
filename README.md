@@ -5,17 +5,23 @@ fantasy-relevant skill player (QB/RB/WR/TE) it is intended to output a calibrate
 breakout probability, an expected finish-vs-ADP delta, and the SHAP drivers behind
 each call.
 
-> **Status: v1.5 complete.** v1 (nflverse ingest, market expectation,
+> **Status: v1.7 complete.** v1 (nflverse ingest, market expectation,
 > breakout labels, all four positions' features/models, SHAP
-> explainability, the 2026 breakout board) plus three v1.5 additions: a
-> code-complete Odds API ingest (local run required — this environment's
-> proxy blocks the API), Laplace-smoothed calibration (kills v1's
-> isotonic terminal-bucket saturation), and pbp-derived red-zone/goal-line
-> share features with a full from-scratch retrain of all four position
-> models. See [Progress](#progress) for verdicts, "v1.5: Laplace-smoothed
-> calibration" / "v1.5: pbp red-zone features + retrain" / "v1.5 Odds API"
-> above for what's new, and [Known Limitations](#known-limitations) for
-> what to take with a grain of salt.
+> explainability, the 2026 breakout board) plus v1.5 (Odds API ingest,
+> Laplace-smoothed calibration, pbp-derived red-zone/goal-line share
+> features, the Vegas team/prop promotion gate) plus **v1.7: a per-position
+> proxy-era training-pool sensitivity check (RB moved to a real-market-only
+> pool), a 3-seed Optuna ensemble replacing single-seed tuning, Platt
+> calibration as the active method (isotonic dropped to legacy/reference
+> only), a per-position base-rate renormalization layer at board time
+> (replacing the old isotonic-saturation clamp as the thing keeping
+> displayed probabilities honest), and two more "fair" baselines
+> (eligible-prior-ppg, napkin-logistic) in every report.** All four
+> positions were retrained from scratch under this generation. See
+> [Progress](#progress) for verdicts, "v1.7: fixes" below for what changed
+> and why, and [Known Limitations](#known-limitations) for what to take
+> with a grain of salt. (v1.6 was an internal-only checkpoint folded into
+> this v1.7 pass — no separate v1.6 section exists.)
 
 ## Setup
 
@@ -356,32 +362,37 @@ read from the shipped `fantasy_points_ppr` column. See
 - [x] **Phase 3/4 (all four positions)** — feature builders (leakage-tested
       two ways per position: season-N stats stripped ⇒ identical output;
       team context keyed to Week-1 rosters, not final-team rosters) +
-      LGBM/XGB/L2-logistic blend, isotonic-calibrated, expanding-window CV
-      (val 2020–2023), one frozen holdout eval (2024–2025) each. **v1.5
-      retrained all four from scratch** (real Optuna config, not tuning
-      shortcuts) with the new pbp red-zone features added — see "v1.5:
-      pbp red-zone features + retrain" below for the full v1-vs-v1.5
-      comparison. Current (v1.5) verdicts, copied verbatim from each
-      position's `outputs/model_{pos}_report.md` (regenerate with `make
-      retrain`) — these ARE freshly regenerated on this build, fixing v1's
-      stale-decimal caveat (see git history for the exact v1 numbers this
-      superseded):
-      - **WR** — DOES NOT beat baseline on top-10 precision (0.000 vs
-        0.000) but BEATS it on PR-AUC (0.104 vs 0.038, +0.066).
+      LGBM/XGB/L2-logistic blend, Platt-calibrated (v1.7 — was isotonic in
+      v1, SmoothedIsotonic in v1.5; see "v1.7: fixes" above), expanding-window
+      CV, one frozen holdout eval (2024–2025) each. **v1.7 retrained all
+      four from scratch** under the new 3-seed Optuna ensemble (RB also
+      moved to a real-market-only 2020+ training pool — see "v1.7: fixes"
+      → "Step 1"/"Step 2" above for the full comparison tables). Current
+      (v1.7) verdicts, copied verbatim from each position's
+      `outputs/model_{pos}_report.md` (regenerate with `make retrain`):
+      - **WR** — BEATS baseline 2 (prior-season ppg rank) on both top-10
+        precision (0.200 vs 0.000, +0.200) and PR-AUC (0.132 vs 0.038,
+        +0.095) — the top-10 flip from v1.5 (was 0.000 vs 0.000) is this
+        generation's single biggest qualitative change.
       - **RB** — BEATS baseline on both top-10 precision (0.200 vs 0.000,
-        +0.200) and PR-AUC (0.119 vs 0.028, +0.091).
+        +0.200) and PR-AUC (0.177 vs 0.028, +0.149).
       - **TE** — BEATS baseline on both top-10 precision (0.200 vs 0.000,
-        +0.200) and PR-AUC (0.093 vs 0.069, +0.024).
-      - **QB** — BEATS baseline on both top-10 precision (0.200 vs 0.000,
-        +0.200) and PR-AUC (0.167 vs 0.054, +0.113) — unchanged from v1
-        (QB gets no pbp-derived features, per the brief).
+        +0.200) and PR-AUC (0.383 vs 0.069, +0.315).
+      - **QB** — BEATS baseline on both top-10 precision (0.300 vs 0.000,
+        +0.300) and PR-AUC (0.395 vs 0.054, +0.341).
 
-      Read these with the brief's own honesty rule in mind: holdout
-      positives are single digits per position (RB/TE/QB especially — see
-      `src/models/train.py`'s "Small-sample caveat" docstring), so a
-      handful of hits/misses moves these numbers a lot. Modest, real,
-      uneven lift — not proof of a large edge, and WR's top-10 metric in
-      particular is thin evidence either way at this sample size.
+      All four also beat or tie both v1.7 "fair" baselines
+      (`eligible_prior_ppg`, `napkin_logistic`) on holdout top-10 precision
+      — the one PR-AUC exception (RB's `napkin_logistic` edges the model,
+      0.202 vs 0.177) is reported plainly in "v1.7: fixes" → "Step 4"
+      above, not hidden. Read all of this with the brief's own honesty
+      rule in mind: holdout positives are single digits per position
+      (RB/TE/QB especially — see `src/models/train.py`'s "Small-sample
+      caveat" docstring), so a handful of hits/misses moves these numbers
+      a lot — TE/QB's large PR-AUC jumps this generation are plausible at
+      this sample size, not proof of a proportionally large capability
+      jump. Real, broad-based lift across every position on this holdout
+      pass — still not proof of a large edge at this sample size.
 - [x] **Phase 5** — SHAP explainability: `outputs/shap_{pos}.png` (global
       beeswarm, nonzero-weight tree models) + `--why "Player Name"`
       per-player cards (`src/explain/shap_report.py`)
@@ -415,6 +426,35 @@ read from the shipped `fantasy_points_ppr` column. See
       positions rejected**, so the Vegas columns stay in the matrix but
       excluded from every position's trees — see "v1.5 Phase C: Vegas
       team/prop features" below
+- [x] **v1.7 Step 1 — proxy-era training-pool sensitivity**:
+      `src/models/proxy_sensitivity.py` (`outputs/proxy_sensitivity.md`),
+      binding decision rule applied mechanically per position — **RB
+      moved to `train_season_start: 2020`**, WR/TE/QB keep the full
+      2014-2025 pool — see "v1.7: fixes" → "Step 1" above
+- [x] **v1.7 Step 2 — seed-ensemble retrain**: `configs/model_{pos}.yaml`'s
+      `optuna.seeds: [42, 1337, 2024]`, `src.models.train`'s ensemble mode
+      (per-seed LGBM+XGB tune/OOF, one shared logistic head, raw score =
+      mean of per-seed blended scores), full retrain of all four positions
+      — every position improved or held on holdout PR-AUC and top-10
+      precision vs. the prior generation, no regressions — see "v1.7:
+      fixes" → "Step 2" above
+- [x] **v1.7 Step 3 — honest probabilities**: Platt replaces
+      SmoothedIsotonic as the ACTIVE calibrator (strictly monotone —
+      displayed ranking == raw-score ranking by construction) plus a new
+      per-position base-rate renormalization layer at board time
+      (`board_2026.attach_renormalized_probability`) so each position's
+      displayed probabilities sum to its historical mean per-season
+      breakout count; tiers are now base-rate multiples, not fixed
+      cutoffs — see "v1.7: fixes" → "Step 3" above
+- [x] **v1.7 Step 4 — fair baselines**: `eligible_prior_ppg` and
+      `napkin_logistic` (`src/models/baselines.py`), reported alongside
+      the original three in every report/metrics JSON, no promotion logic
+      — all four positions beat or tie both on holdout top-10 precision;
+      the one PR-AUC exception (RB vs. `napkin_logistic`) is reported
+      plainly — see "v1.7: fixes" → "Step 4" above
+- [x] **v1.7 Step 5 — regenerated every consumer**: board, dashboard, SHAP
+      pngs, every model report/metrics JSON, this README — see "v1.7:
+      fixes" → "Step 5" above
 
 ## v1.5 Odds API (local run required)
 
@@ -569,6 +609,186 @@ position's `excluded_features`; the 2026 board would then need
 mechanical follow-up (see `outputs/vegas_experiment.md`'s summary) never
 exercised here since nothing promoted.
 
+## v1.7: fixes (seed ensemble, honest probabilities, fair baselines, proxy-era pool)
+
+A five-part pass over the modeling pipeline itself (not new features): all
+four positions retrained from scratch under this generation.
+
+### Step 1 — proxy-era training-pool sensitivity
+
+`src/models/proxy_sensitivity.py` (`outputs/proxy_sensitivity.md`) asks,
+per position, holding every hyperparameter and blend weight FROZEN at the
+then-shipped bundle's values (no Optuna retuning): does dropping the
+pre-2020 `adp_source=proxy` rows (prior-season-finish label, not real
+market data — see "Market expectation" above) and training on the
+real-market-only 2020+ pool do at least as well on holdout? Both arms
+retrain on train≤2023 and are scored ONCE on the identical 2024+2025
+holdout rows; Arm B's fold structure is 2 folds (val 2022, val 2023) via
+`cv.validation_folds`'s `MIN_FOLD_TRAIN_YEARS` rule, not 4. Decision rule
+(binding, applied mechanically): choose Arm B iff its holdout top-10
+precision ≥ Arm A's AND its holdout PR-AUC ≥ Arm A's − 0.02.
+
+| Position | Decision | Arm A top-10 / PR-AUC | Arm B top-10 / PR-AUC | 2026 board Spearman (A vs B) |
+|---|---|---|---|---|
+| WR | **keep Arm A** (full 2014-2025) | 0.200 / 0.133 | 0.000 / 0.083 | 0.626 |
+| RB | **adopt Arm B** (2020+ only) | 0.100 / 0.142 | 0.200 / 0.188 | 0.472 |
+| TE | **keep Arm A** (full 2014-2025) | 0.200 / 0.426 | 0.000 / 0.049 | 0.053 |
+| QB | **keep Arm A** (full 2014-2025) | 0.300 / 0.388 | 0.100 / 0.151 | 0.794 |
+
+RB is the one position where the real-market-only pool won outright on
+both metrics — implemented as `configs/model_rb.yaml`'s `train_season_start:
+2020`, consumed by `train.load_modeling_frame` (pool filter) and
+`train.run_full_pipeline` (fold generation), never hardcoded per position.
+WR/TE/QB keep the full pool. See `outputs/proxy_sensitivity.md` for the
+per-season tables and each position's fold structure.
+
+### Step 2 — seed-ensemble retrain
+
+Single-seed Optuna tuning was replaced with a 3-seed ensemble
+(`configs/model_{pos}.yaml`'s `optuna.seeds: [42, 1337, 2024]`): LGBM+XGB
+are tuned and OOF'd independently per seed (own frozen hyperparameters,
+own blend weights against the ONE shared logistic head, tuned once), and
+the model's raw score is the mean of every seed's blended score — same
+mechanism at holdout time (`src.models.train.holdout_predictions`) and at
+2026 board-scoring time (`src.inference.board_2026.score_veterans_batch`).
+Determinism (`tests/test_models_positions.py::test_determinism_seed_ensemble_two_runs_identical`,
+`test_seed_ensemble_raw_score_is_mean_of_per_seed_blends`): a fixed seed
+list reproduces byte-identical holdout predictions and per-seed structure
+across independent runs. All four positions were retrained through this
+new ensemble path; holdout (2024+2025 pooled), v1.6-era single-seed
+generation vs this v1.7 seed-ensemble generation, reported plainly:
+
+| Position | PR-AUC (prev.) | PR-AUC (v1.7) | Δ | Top-10 (prev.) | Top-10 (v1.7) | Δ |
+|---|---|---|---|---|---|---|
+| WR | 0.104 | 0.132 | +0.028 | 0.000 | 0.200 | **+0.200** |
+| RB | 0.119 | 0.177 | +0.058 | 0.200 | 0.200 | +0.000 |
+| TE | 0.093 | 0.383 | **+0.290** | 0.200 | 0.200 | +0.000 |
+| QB | 0.167 | 0.395 | **+0.228** | 0.200 | 0.300 | +0.100 |
+
+Every position improved or held on both metrics — no regressions.
+("prev." = the last recorded verdict from this repo's prior generation,
+before this pass's retrain overwrote the gitignored `outputs/model_*`
+artifacts those numbers came from — WR's is read directly off the JSON
+this session captured before retraining; RB/TE/QB's are the exact
+figures this README's own Progress section carried, git-tracked, from
+that generation. See the honesty note in Known Limitations about this.)
+TE/QB's large PR-AUC jumps are consistent with — not necessarily entirely
+caused by ensembling alone; the pool didn't change, so this is one seed's
+worth of retrain variance plus ensembling — this pipeline's own documented
+small-sample caveat (4-5 holdout positives): a single ranking flip moves
+PR-AUC a lot at this sample size. Read the fold-level spread in each
+`outputs/model_{pos}_report.md`, not just the pooled mean.
+
+### Step 3 — honest probabilities
+
+**Calibration:** the ACTIVE calibration method is now Platt scaling
+(`src.models.train.fit_platt`, a sigmoid on the pooled OOF ensemble
+score) instead of v1.5's SmoothedIsotonic. Platt is strictly monotone, so
+the calibrated ranking is identical to the raw-score ranking by
+construction (`tests/test_inference.py::test_board_displayed_ranking_matches_raw_score_ranking`)
+— isotonic-family calibrators are only *non-decreasing*, and their flat
+blocks could shift ranking (see the "Calibrated vs. raw-blend metrics"
+limitation below, which this doesn't retire, since raw-vs-calibrated
+metric equivalence still isn't guaranteed for every calibrator this repo
+keeps around). The old isotonic/Platt-fallback choice
+(`legacy_calibration_method` in every `outputs/model_{pos}_metrics.json`)
+and v1.5's SmoothedIsotonic are both still fit and stored on every bundle,
+never deleted — just no longer what the board scores off of.
+
+**Renormalization (board/inference time, presentation-layer only,
+`src/inference/board_2026.py`):** a calibrated probability is only ever
+calibrated against its own OOF validation pool — nothing forces a
+position's SUM of 2026 calibrated probabilities to equal how many
+breakouts that position actually produces in a season, and pre-v1.7 it
+didn't (verified: several positions summed to well over their historical
+per-season breakout count). `attach_renormalized_probability` fixes this
+at board time: `scale = historical_mean_breakouts / sum(calibrated p over
+that position's 2026 veterans)` (computed from `labels.parquet`, 2014-2025,
+never hardcoded), `displayed_probability = min(0.97, p * scale)`. Because
+the scale is one positive constant per position, it cannot change
+within-position ranking. The board CSV now carries `probability`
+(displayed, renormalized), `probability_calibrated_raw` (pre-rescale
+Platt output), and `raw_score` (pre-calibration) side by side. Verified on
+this build:
+
+| Position | Renorm scale | Sum(displayed probability) | Historical mean breakouts/season | Base rate (this year's pool) |
+|---|---|---|---|---|
+| WR | 1.065 | 5.08 | ~5.08 | 0.0183 (n=278 scored) |
+| RB | 0.714 | 5.25 | ~5.25 | 0.0318 (n=165 scored) |
+| TE | 0.601 | 2.67 | ~2.67 | 0.0180 (n=148 scored) |
+| QB | 1.101 | 4.42 | ~4.42 | 0.0455 (n=97 scored) |
+
+(Sum(displayed) matches the historical mean by construction post-rescale,
+modulo the 0.97 cap on any individual player, which didn't bind hard
+enough on this build to move any position's sum outside a tight band —
+locked by `tests/test_inference.py::test_board_displayed_probability_sum_near_historical_mean_breakouts`,
+±20% tolerance.)
+
+**Tiers are now base-rate multiples**, not fixed absolute cutoffs: a
+position's `base_rate` = historical mean breakouts ÷ players scored at
+that position this year (table above), and a player's tier is their
+displayed probability's multiple of it — **Elite target** (8x+), **Strong
+swing** (4-8x), **Worth a flier** (2-4x), **Long shot** (under 2x) —
+computed server-side (`board_2026.attach_renormalized_probability`) and
+carried on every board row (`tier`, `base_rate_multiple`), not
+recomputed against a fixed threshold client-side the way v1's dashboard
+did. The dashboard's tier legend and "what the percentage means" banner
+were updated to match (`src/dashboard/template.py`).
+
+### Step 4 — fair baselines
+
+Two more baselines (`src/models/baselines.py`), evaluated on validation
+folds and the one holdout pass, reported alongside the original three in
+every `outputs/model_{pos}_report.md` / `metrics.json`:
+
+- **`eligible_prior_ppg`** — ranks only label-ELIGIBLE players
+  (`expectation_pos_rank >= adp_worse_than`, the identical gate
+  `src.labels.build` uses to define a breakout at all) by `ppr_ppg_n1`
+  descending; every ineligible player scores below every eligible one.
+- **`napkin_logistic`** — an L2 logistic on 3 features
+  (`expectation_pos_rank`, `ppr_ppg_n1`, `age`), median-imputed, fit per
+  fold for validation and once on train≤2023 for holdout — a genuinely
+  competitive "napkin math" baseline, not a straw man.
+
+No promotion logic — these never feed back into feature selection or
+hyperparameters, purely a harder honesty check. Holdout (2024+2025
+pooled), model vs. the better of these two on top-10 precision (the
+brief's binding metric for this check):
+
+| Position | Model top-10 | eligible_prior_ppg top-10 | napkin_logistic top-10 | Model PR-AUC | eligible PR-AUC | napkin PR-AUC |
+|---|---|---|---|---|---|---|
+| WR | 0.200 | 0.100 | 0.000 | 0.132 | 0.106 | 0.048 |
+| RB | 0.200 | 0.000 | 0.100 | 0.177 | 0.061 | **0.202** |
+| TE | 0.200 | 0.200 (tie) | 0.000 | 0.383 | 0.161 | 0.045 |
+| QB | 0.300 | 0.100 | 0.000 | 0.395 | 0.113 | 0.050 |
+
+Said plainly: the model beats or ties both fair baselines on top-10
+precision at every position (TE ties `eligible_prior_ppg` rather than
+beating it outright). On PR-AUC, RB is the one exception —
+`napkin_logistic` (0.202) edges the model (0.177) — reported here rather
+than hidden; RB's holdout pool is thin (4 positives) and this position
+also just moved to the smaller real-market-only training pool (Step 1),
+both of which push PR-AUC toward noisier at this sample size.
+
+### Step 5 — regenerated consumers
+
+`make board` (renormalized 2026 board), `make dashboard-build` (tier
+legend + percentage-meaning banner updated), `outputs/shap_{pos}.png` +
+every `outputs/model_{pos}_{report.md,metrics.json}` all regenerated
+through the normal pipeline from this generation's bundles — nothing
+hand-edited. Golden-player regression tests
+(`tests/test_inference.py::GOLDEN_PLAYERS`) were left as originally
+encoded (they check "scores above the position+season median" via each
+bundle's legacy single-base-seed path, which this pass keeps unchanged
+alongside the new ensemble path specifically so modules out of this
+pass's scope — `src.explain.shap_report`, `src.models.vegas_experiment`,
+`src.models.overlay_backtest` — and this regression check keep working
+off a normal single-model bundle shape); board-schema tests were updated
+for the new/renamed columns (`probability_calibrated_raw`, `tier`,
+`base_rate_multiple`) and the new probability range ((0, 0.97] instead of
+the old fixed [0.01, 0.95] clamp) — see `tests/test_inference.py`'s diff
+for the exact assertions changed and why.
+
 ## Known Limitations
 
 - **Roughly 4–5k usable training rows** are expected across the whole
@@ -638,15 +858,28 @@ exercised here since nothing promoted.
   `data/external/README.md`) are the intended escape hatch and are empty
   by default — the board's `sleeper_adp_pos_rank`, `adp_gap`, and
   `implied_pts` columns are null until one is supplied.
-- **(Fixed in v1.5) Isotonic calibration saturated at the extremes in v1.**
-  At this pool size, a position's highest/lowest raw-score OOF bucket
-  could land entirely on one class, which plain isotonic maps to an exact
-  0.0 or 1.0 — verified on the v1 build: hundreds of veteran rows across
-  all four positions hit an exact 0.0 or 1.0 (mostly the low end). v1.5's
-  `src.models.train.SmoothedIsotonic` fixes this at the source — see "v1.5:
-  Laplace-smoothed calibration" above — rather than only clamping for
-  display; the `[0.01, 0.95]` clamp and `probability_saturated` flag stay
-  on as a no-op safety net (0 rows hit it on this build).
+- **(Fixed in v1.5, superseded in v1.7) Isotonic calibration saturated at
+  the extremes in v1; v1.7 replaced the active calibrator entirely and
+  added per-position renormalization.** History: at this pool size, a
+  position's highest/lowest raw-score OOF bucket could land entirely on
+  one class, which plain isotonic maps to an exact 0.0 or 1.0 — verified
+  on the v1 build: hundreds of veteran rows across all four positions hit
+  an exact 0.0 or 1.0 (mostly the low end). v1.5's
+  `src.models.train.SmoothedIsotonic` fixed this at the source (Laplace/
+  rule-of-succession smoothing — never exactly 0/1). v1.7 went further:
+  the ACTIVE calibrator is now Platt (strictly monotone, so displayed
+  ranking == raw-score ranking by construction — a stronger guarantee than
+  "never exactly 0/1"), and a separate honesty gap SmoothedIsotonic never
+  addressed — nothing forces a position's SUMMED calibrated probabilities
+  to match how many breakouts that position actually produces in a season
+  — is closed by a per-position base-rate renormalization at board time.
+  See "v1.7: fixes" → "Step 3 — honest probabilities" above for the full
+  writeup, the renormalization-factor table, and why tiers are now
+  base-rate multiples instead of fixed cutoffs. The `[0.01, 0.95]` clamp
+  and `probability_saturated` flag still exist on the pre-rescale
+  `probability_calibrated_raw` column as a no-op safety net (0 rows hit it
+  on this build); the displayed `probability` column's range is now
+  `(0, 0.97]`, capped post-rescale.
 - **The new pbp red-zone/goal-line share features are nullable, not a
   requirement.** `configs/data.yaml`'s `pbp` entry is `required: false`
   and genuinely has 0 rows for the current season (2026, no games played)
@@ -672,38 +905,36 @@ exercised here since nothing promoted.
   cross-file number mismatch as this — not as evidence of a different
   model generation — unless you've confirmed both sides used the same
   score column.
-- **The training pipeline's own "two calls -> identical holdout
-  predictions" determinism guarantee did not hold across separate
-  process invocations during this review, despite a fixed seed,
-  identical config, and identical data.** Re-running
-  `run_full_pipeline` for WR three times in immediate succession
-  produced three different Optuna-selected hyperparameter sets (e.g.
-  blend weights `{lgbm: 0.1, xgb: 0.9}` vs. `{lgbm: 0.2, xgb: 0.8}`,
-  `n_estimators` 246 vs. 488) — the root cause wasn't isolated (most
-  likely BLAS/OpenMP thread-count-sensitive floating point somewhere in
-  the tuning loop, since `n_jobs=1`/`deterministic=True` only pin the
-  GBM libraries' own parallelism, not every linear-algebra call
-  upstream of them). **This is a real, verified finding, not the
-  "excluded-but-present Vegas columns perturb column order" mechanism
-  once suspected** — disproved directly: `tree_feature_columns`' cfg
-  exclusion filters a fixed-order column list, so Optuna sees an
-  identical, identically-ordered feature matrix whether or not
-  `implied_ppg`/`implied_win_prob`/`has_vegas` exist elsewhere in the
-  wider dataframe; three retrains with those columns present-but-excluded
-  the entire time still diverged from each other. What *did* stay
-  stable across all three WR retrains, empirically (not guaranteed at a
-  different sample size): the final rounded holdout PR-AUC/top-10
-  precision in `outputs/model_{pos}_report.md` (0.104 / 0.000 all three
-  times, at ~250 holdout rows / 7 positives) — while `overlay_backtest.md`
-  and `vegas_experiment.md`'s own scores (which lean more on the
-  OOF-validation-fold predictions and the raw blend) did shift between
-  runs. Practical guidance: regenerate `data/models/*.joblib`,
-  `outputs/model_*_{report.md,metrics.json}`, `outputs/overlay_backtest.md`,
-  `outputs/vegas_experiment.md`, and `outputs/breakout_board_2026.*`
-  together, from the same retrain pass, never independently; treat a
-  cross-regeneration PR-AUC delta under roughly 0.03 or a one-hit
-  top-10 swing as generation noise rather than a real improvement or
-  regression, on either side of a comparison. This needs real
-  root-causing (candidate: pin `OMP_NUM_THREADS=1`/`OPENBLAS_NUM_THREADS=1`
-  and re-verify) — flagged here, not fixed, since it's outside this
-  pass's requested scope.
+- **(Mitigated in v1.7 by seed ensembling — root cause still not fixed)
+  Cross-process-invocation instability in Optuna's hyperparameter search.**
+  History (v1.5/v1.6 review): re-running `run_full_pipeline` for WR three
+  times in immediate succession, same seed/config/data, produced three
+  different Optuna-selected hyperparameter sets (blend weights `{lgbm:
+  0.1, xgb: 0.9}` vs. `{lgbm: 0.2, xgb: 0.8}`, `n_estimators` 246 vs. 488)
+  — most likely BLAS/OpenMP thread-count-sensitive floating point
+  somewhere in the tuning loop, since `n_jobs=1`/`deterministic=True` only
+  pin the GBM libraries' own parallelism, not every linear-algebra call
+  upstream of them; never root-caused. v1.7 does not fix this at the
+  source (still flagged, not resolved — pinning
+  `OMP_NUM_THREADS=1`/`OPENBLAS_NUM_THREADS=1` and re-verifying remains
+  the concrete next step). What v1.7 changes: `configs/model_{pos}.yaml`'s
+  `optuna.seeds: [42, 1337, 2024]` means the SHIPPED score was never
+  resting on one seed's search outcome to begin with — it's already the
+  mean of three independent Optuna seeds' blended scores
+  (`src.models.train`'s ensemble mode, "v1.7: fixes" → "Step 2" above),
+  which directly blunts the practical impact of any one seed's search
+  landing somewhere unlucky, even without root-causing why. Determinism
+  itself (same seed list, same everything else ⇒ byte-identical reruns,
+  including the full per-seed structure) IS locked by test within a
+  single process/session
+  (`tests/test_models_positions.py::test_determinism_seed_ensemble_two_runs_identical`)
+  — what was never re-verified in this pass is whether the underlying
+  per-seed instability across SEPARATE process invocations (the original
+  finding) still reproduces; that would need the same three-separate-`python
+  -m src.models.train_wr`-invocations experiment repeated against the v1.7
+  ensemble path, which this pass didn't have separate scope to run. Same
+  practical guidance as before still applies: regenerate
+  `data/models/*.joblib`, every `outputs/model_*_{report.md,metrics.json}`,
+  `outputs/overlay_backtest.md`, `outputs/vegas_experiment.md`, and
+  `outputs/breakout_board_2026.*` together, from the same retrain pass,
+  never independently.

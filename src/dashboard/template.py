@@ -274,12 +274,18 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
   switchView("board");
 
   // =========================================================== BOARD VIEW
-  const TIERS = [
-    { min: 0.40, cls: "t4", label: "Elite target" },
-    { min: 0.20, cls: "t3", label: "Strong swing" },
-    { min: 0.10, cls: "t2", label: "Worth a flier" },
-    { min: -1,  cls: "t1", label: "Long shot" },
-  ];
+  // v1.7: tiers are base-rate MULTIPLES ("N times a normal late pick's odds at this
+  // position"), computed server-side (src.inference.board_2026.attach_renormalized_probability
+  // -- base_rate = historical mean per-season breakouts / players scored at that position
+  // this year) and shipped on every board row as r.tier/r.brm -- not recomputed client-side
+  // against a fixed absolute cutoff the way v1's TIERS array did, since a fixed cutoff isn't
+  // meaningful across positions with very different base rates (QB's is much higher than
+  // TE's, historically). TIER_CLASS is just the label->CSS-class lookup.
+  const TIER_CLASS = { "Elite target": "t4", "Strong swing": "t3", "Worth a flier": "t2", "Long shot": "t1" };
+  function tier(r) {
+    const label = r.tier || "Long shot";
+    return { cls: TIER_CLASS[label] || "t1", label: label };
+  }
   const vets = BOARD.filter(r => !r.rk), rooks = BOARD.filter(r => r.rk);
   const TABS = [
     {id:"QB", label:"QB", rows: vets.filter(r=>r.p==="QB")},
@@ -300,7 +306,7 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       <div class="step"><span class="k">3 &middot; Check the news first</span>
         <p>This board <b>doesn't know about injuries</b>, suspensions, or holdouts. Thirty seconds of news-checking beats the math.</p></div>
     </div>
-    <p class="caveat"><b>What the percentage means:</b> the chance this cheap player finishes the season as a true weekly starter anyway (top-12 QB, top-15 RB, top-18 WR, top-8 TE). A random late pick has a 3&ndash;6% chance. So 25% is a strong bet, 50%+ is the model pounding the table &mdash; and even then, expect roughly 2 of your 8 late swings to hit, not all of them.</p>
+    <p class="caveat"><b>What the percentage means:</b> the chance this cheap player finishes the season as a true weekly starter anyway (top-12 QB, top-15 RB, top-18 WR, top-8 TE). Each position's percentages are normalized so the total across everyone scored at that position matches how many breakouts actually happen there in a typical season &mdash; so a 25% WR and a 25% QB reflect the same kind of real base-rate comparison, not two calibration curves that happen to output the same number. The tier label below is a multiple of a random late pick's odds at that spot (see Verdict in "How to read this board") &mdash; even an Elite target won't hit every time.</p>
     <nav class="controls" aria-label="Board controls">
       <div class="tabs" role="tablist" id="tabs"></div>
       <input type="search" id="q" placeholder="Search player or team&hellip;" aria-label="Search player or team">
@@ -321,8 +327,8 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       <h2>How to read this board</h2>
       <div class="glossary">
         <div><b>Draft cost &mdash; "goes ~WR39"</b>Where drafters are currently taking him: the 39th receiver picked, i.e. a bench-round price. Lower number = more expensive.</div>
-        <div><b>The percentage</b>The model's calibrated odds he finishes as a weekly starter despite that cheap price. It's the only number you need on draft night.</div>
-        <div><b>Verdict</b>The same number in plain words: <b>Elite target</b> (40%+), <b>Strong swing</b> (20&ndash;39%), <b>Worth a flier</b> (10&ndash;19%), <b>Long shot</b> (under 10%).</div>
+        <div><b>The percentage</b>The model's calibrated odds he finishes as a weekly starter despite that cheap price, rescaled so each position's percentages add up to how many breakouts that position actually produces in a season. It's the only number you need on draft night.</div>
+        <div><b>Verdict</b>That percentage as a multiple of a normal late pick's odds at his position: <b>Elite target</b> (8x or more), <b>Strong swing</b> (4&ndash;8x), <b>Worth a flier</b> (2&ndash;4x), <b>Long shot</b> (under 2x).</div>
         <div><b>Market ▲ / ▼</b>How his preseason ranking has moved across the summer's weekly consensus snapshots. ▲ = the market is warming up on him since June; ▼ = it's cooling.</div>
         <div><b>▲ and ▼ inside a row (tap to open)</b>Why the model thinks so. ▲ = a fact working in his favor (lots of catches last year, new team, cheap price). ▼ = a fact working against him.</div>
         <div><b>Numbers panel (inside a row)</b>Tap "Show the numbers" for the raw feature values and percentiles behind the call, plus the full market-drift chart &mdash; the detail underneath the plain-language verdict.</div>
@@ -341,7 +347,6 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
   document.getElementById("q").addEventListener("input", e => { query = e.target.value.trim().toLowerCase(); renderBoard(); });
   document.getElementById("sort").addEventListener("change", e => { sortKey = e.target.value; renderBoard(); });
 
-  function tier(p) { return TIERS.find(t => (p ?? 0) >= t.min); }
   function driverChips(s, n) {
     return (s || "").split(", ").filter(Boolean).slice(0, n).map(tok => {
       const i = tok.lastIndexOf(":");
@@ -443,7 +448,7 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       const key = r.key;
       const p = r.pr == null ? 0 : Math.min(100, Math.round(100 * r.pr / maxP));
       const shown = r.pr == null ? "—" : Math.round(r.pr * 100) + "%";
-      const tr = tier(r.pr);
+      const tr = tier(r);
       const sub = [r.t, r.a ? "age " + Math.round(r.a) : null].filter(Boolean).join(" &middot; ");
       const profileHTML = featureProfileHTML(key);
       const sparkHTML = sparklineHTML(key);
@@ -585,7 +590,7 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       '<h2>What "breakout" means</h2>' +
       '<p>A breakout is a player who (a) finished the season inside a real starter’s range at his position, and (b) wasn’t expected to going in — both conditions have to be true. The exact bars: ' + esc(thLine) + '. A player good enough to finish there but who was already expected to (a first-round pick, say) doesn’t count — this board is about the market’s misses, not just good players.</p>' +
       '<h2>What the percentage means</h2>' +
-      '<p>It’s a <b>calibrated</b> probability: among every player the model has ever said "25%" about, roughly 1 in 4 actually broke out. The league-wide base rate for a random cheap/late player is about 3–6% (QB highest, WR/TE thinnest — see the Positions view for the real number at each spot), so anything meaningfully above that is the model finding a real signal, not noise.</p>' +
+      '<p>It starts as a <b>calibrated</b> probability (Platt scaling on the seed-ensemble score, v1.7) — among every player the model has ever said "25%" about, roughly 1 in 4 actually broke out. Then it gets <b>renormalized per position</b>: nothing about a calibration curve forces a position\'s probabilities to sum to how many breakouts that position actually produces in a season, so each position is rescaled so they do (see the README\'s v1.7 section). The league-wide base rate for a random cheap/late player is about 3–6% (QB highest, WR/TE thinnest — see the Positions view for the real number at each spot); a tier label is that player\'s displayed percentage as a multiple of his own position\'s base rate this year, not a fixed cutoff.</p>' +
       '<h2>What it trains on</h2>' +
       '<p>Only information that existed <b>before</b> the season started: the player’s own prior-season usage and efficiency, his team’s situation (new coach, new offensive coordinator, teammates who left and freed up targets/carries), his draft pedigree, and the market’s own preseason consensus rank. Every feature is built with a strict N-1 shift — nothing from the season being predicted ever leaks into the inputs used to predict it. That is the one rule the whole pipeline is built around.</p>' +
       '<h2>What it does NOT know</h2>' +

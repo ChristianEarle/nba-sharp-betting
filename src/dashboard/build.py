@@ -184,6 +184,8 @@ def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
                 "rk": bool(r["is_rookie"]),
                 "pr": r["display_prob"] if pd.notna(r["display_prob"]) else None,
                 "rs": r["raw_score"] if pd.notna(r["raw_score"]) else None,
+                "tier": r["tier"] if pd.notna(r.get("tier")) else None,
+                "brm": r["base_rate_multiple"] if pd.notna(r.get("base_rate_multiple")) else None,
                 "e": r["consensus_ecr_pos_rank"] if pd.notna(r["consensus_ecr_pos_rank"]) else None,
                 "dr": r["draft_round"] if pd.notna(r["draft_round"]) else None,
                 "d": r["expected_rank_delta"] if pd.notna(r["expected_rank_delta"]) else None,

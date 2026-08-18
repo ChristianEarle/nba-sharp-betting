@@ -93,9 +93,10 @@ from sklearn.isotonic import IsotonicRegression, isotonic_regression
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
+from src.labels.build import load_labels_config
 from src.models import baselines as bl
 from src.models import metrics as mt
-from src.models.cv import HOLDOUT_SEASONS, VALIDATION_SEASONS, Fold, holdout_split, validation_folds
+from src.models.cv import HOLDOUT_SEASONS, TRAIN_START_SEASON, VALIDATION_SEASONS, Fold, holdout_split, validation_folds
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 # LightGBM's sklearn wrapper warns that the `eval_set` kwarg is being
@@ -206,6 +207,15 @@ def load_modeling_frame(
     joined = feats.join(labels, on=["season", "gsis_id"], how="inner")
     joined = joined.filter(pl.col("in_training_pool"))
     df = joined.sort(["season", "gsis_id"]).to_pandas()
+
+    # v1.7 (proxy-era sensitivity, src/models/proxy_sensitivity.py): a position
+    # whose config sets ``train_season_start`` restricts the modeling pool to
+    # season >= that year (e.g. 2020 -> real-market-ECR-only labels, dropping
+    # the pre-2020 prior-season-finish proxy rows). Absent/unset keeps every
+    # position's default of TRAIN_START_SEASON (2014, the full pool) --
+    # config-driven per Step 1's decision rule, not hardcoded per position.
+    train_season_start = (cfg or {}).get("train_season_start", TRAIN_START_SEASON)
+    df = df[df["season"] >= train_season_start].reset_index(drop=True)
 
     categories = cfg["adp_source_categories"]
     baseline_cat = cfg["adp_source_baseline"]
@@ -487,6 +497,67 @@ def classifier_oof(
     return pooled, fold_metrics, best_iters
 
 
+def tune_and_oof_classifier_head(
+    df: pd.DataFrame, feature_cols: list[str], folds: list[Fold], cfg: dict, n_trials: int, seed: int
+) -> dict:
+    """v1.7 seed-ensemble: everything one seed's LGBM+XGB classifier head needs -- Optuna
+
+    search (this seed's sampler), frozen-param OOF predictions, and the mean-best-iteration
+    n_estimators for the no-early-stopping holdout retrain -- bundled per call so
+    ``run_full_pipeline`` can just loop ``cfg["optuna"]["seeds"]`` and collect one of these
+    per seed. Everything here is byte-identical to what the pre-ensemble pipeline did for
+    its single seed; the ensemble is additive (run this once per seed, average the results),
+    not a change to how any individual seed is tuned.
+    """
+    lgbm_study = tune_classifier(df, feature_cols, folds, "lgbm", cfg, n_trials, seed)
+    xgb_study = tune_classifier(df, feature_cols, folds, "xgb", cfg, n_trials, seed)
+    lgbm_best_params, xgb_best_params = lgbm_study.best_params, xgb_study.best_params
+    lgbm_oof, lgbm_fold_metrics, lgbm_best_iters = classifier_oof(df, feature_cols, folds, "lgbm", lgbm_best_params, seed)
+    xgb_oof, xgb_fold_metrics, xgb_best_iters = classifier_oof(df, feature_cols, folds, "xgb", xgb_best_params, seed)
+    return {
+        "seed": seed,
+        "lgbm_study": lgbm_study,
+        "xgb_study": xgb_study,
+        "lgbm_params": lgbm_best_params,
+        "xgb_params": xgb_best_params,
+        "lgbm_oof": lgbm_oof,
+        "xgb_oof": xgb_oof,
+        "lgbm_fold_metrics": lgbm_fold_metrics,
+        "xgb_fold_metrics": xgb_fold_metrics,
+        "lgbm_final_n_estimators": int(round(np.mean(lgbm_best_iters))),
+        "xgb_final_n_estimators": int(round(np.mean(xgb_best_iters))),
+    }
+
+
+def ensemble_blend_and_pool(per_seed: list[dict], logit_oof: pd.DataFrame, grid_step: float) -> tuple[list[dict], pd.DataFrame]:
+    """Per-seed blend-weight grid search (each seed's own LGBM/XGB OOF + the one shared
+
+    logistic OOF), then the ensemble raw score: the mean, across seeds, of each seed's
+    blended OOF prediction for the same (season, gsis_id) row -- "define the model's raw
+    score as the mean of the per-seed blended scores" (v1.7 brief). Mutates each ``per_seed``
+    dict in place with its ``blend_weights``/``blend_pr_auc``/``pooled_seed_blend``; returns
+    it back plus the pooled ensemble frame (season, gsis_id, breakout, pred_blend).
+    """
+    for ps in per_seed:
+        weights, pr_auc, merged = blend_grid_search({"lgbm": ps["lgbm_oof"], "xgb": ps["xgb_oof"], "logistic": logit_oof}, grid_step)
+        merged["pred_blend"] = apply_blend(weights, lgbm=merged["pred_lgbm"], xgb=merged["pred_xgb"], logistic=merged["pred_logistic"])
+        ps["blend_weights"] = weights
+        ps["blend_pr_auc"] = pr_auc
+        ps["pooled_seed_full"] = merged
+        ps["pooled_seed_blend"] = merged[["season", "gsis_id", "breakout", "pred_blend"]].copy()
+
+    base = per_seed[0]["pooled_seed_blend"][["season", "gsis_id", "breakout"]].copy()
+    stacked = pd.concat(
+        [ps["pooled_seed_blend"].set_index(["season", "gsis_id"])["pred_blend"].rename(f"seed_{ps['seed']}") for ps in per_seed],
+        axis=1,
+    )
+    assert not stacked.isna().any().any(), "seed OOF pools misaligned -- every seed must cover the identical (season, gsis_id) rows"
+    ensemble = base.set_index(["season", "gsis_id"])
+    ensemble["pred_blend"] = stacked.mean(axis=1).to_numpy()
+    ensemble = ensemble.reset_index()
+    return per_seed, ensemble
+
+
 def tune_logistic(
     df: pd.DataFrame, feature_cols: list[str], folds: list[Fold], cfg: dict, seed: int
 ) -> tuple[float, float, dict[float, list[float]]]:
@@ -594,6 +665,27 @@ def choose_calibration(y_true, raw_score) -> tuple[str, object, dict]:
     platt.fit(raw_score.reshape(-1, 1), y_true)
     platt_brier = mt.brier(y_true, platt.predict_proba(raw_score.reshape(-1, 1))[:, 1])
     return "platt", platt, {"raw_brier": raw_brier, "isotonic_brier": iso_brier, "platt_brier": platt_brier}
+
+
+def fit_platt(y_true, raw_score) -> LogisticRegression:
+    """v1.7: Platt scaling (1-feature ``LogisticRegression``) as the ACTIVE calibration
+
+    method, unconditionally -- no isotonic-vs-Platt Brier comparison (that's
+    ``choose_calibration``, still run and stored for reference, never deleted; see the
+    "Honest probabilities" section of the v1.7 brief). Platt is a strictly monotone
+    (sigmoid) function of the raw score, so the calibrated ranking is *identical* to the raw
+    ranking by construction -- unlike isotonic, which is only weakly monotone (ties within a
+    PAV block collapse to the same output) and can, at small-bucket sample sizes, saturate to
+    an exact 0.0/1.0 (see ``SmoothedIsotonic``'s docstring below). Fit on the pooled OOF
+    ENSEMBLE score (the mean of every seed's blended prediction -- see
+    ``ensemble_blend_and_pool``), the same "fit once on pooled validation, apply everywhere"
+    discipline every other calibrator in this module follows.
+    """
+    y_true = np.asarray(y_true)
+    raw_score = np.asarray(raw_score, dtype=float).reshape(-1, 1)
+    platt = LogisticRegression()
+    platt.fit(raw_score, y_true)
+    return platt
 
 
 def apply_calibration(method: str, calibrator, score) -> np.ndarray:
@@ -761,12 +853,45 @@ def regressor_oof(
 # --------------------------------------------------------------------------
 
 
-def holdout_predictions(df: pd.DataFrame, seed: int, frozen: dict) -> pd.DataFrame:
-    """Retrain classifier trio on <=2023 with every frozen hyperparameter, predict 2024+2025,
+def _fit_holdout_lgbm(train_df, tree_cols, params, n_estimators, seed, spw):
+    p = dict(params)
+    p["n_estimators"] = n_estimators
+    model = lgb.LGBMClassifier(
+        objective="binary", random_state=seed, deterministic=True, force_row_wise=True,
+        n_jobs=1, verbosity=-1, scale_pos_weight=spw, **p,
+    )
+    model.fit(train_df[tree_cols], train_df["breakout"])
+    return model
 
-    apply the frozen blend weights and the frozen calibrator. No tuning happens here.
+
+def _fit_holdout_xgb(train_df, tree_cols, params, n_estimators, seed, spw):
+    p = dict(params)
+    p["n_estimators"] = n_estimators
+    model = xgb.XGBClassifier(objective="binary:logistic", random_state=seed, n_jobs=1, verbosity=0, scale_pos_weight=spw, **p)
+    model.fit(train_df[tree_cols], train_df["breakout"])
+    return model
+
+
+def holdout_predictions(df: pd.DataFrame, seed: int, frozen: dict) -> pd.DataFrame:
+    """Retrain the classifier heads on <=2023 with every frozen hyperparameter, predict
+
+    2024+2025. No tuning happens here.
+
+    v1.7 seed ensemble: retrains LGBM+XGB once per ``frozen["per_seed"]`` entry (each
+    seed's own frozen params/n_estimators/blend_weights) against the ONE shared logistic
+    head (fit once, at the base ``seed``, exactly as pre-ensemble) -- then averages every
+    seed's blended holdout score into ``pred_blend_raw``/``pred_calibrated`` (calibrated
+    through ``frozen["active_calibrator"]``, Platt on the pooled OOF ensemble score -- see
+    ``fit_platt``'s docstring). The base seed's own single-seed lgbm/xgb/blend are also kept
+    (``pred_lgbm``/``pred_xgb``/``pred_blend_raw_single_seed``/``pred_calibrated_single_seed``)
+    purely for continuity with modules that read one representative tree model off a bundle
+    (``src.explain.shap_report``, ``src.models.vegas_experiment``, ``src.models.overlay_backtest``)
+    -- none of those were in this task's scope to rewrite for an ensemble of models, so the
+    bundle keeps serving them a normal single-model shape (``bundle["lgbm"]``/``["xgb"]``/
+    ``["blend_weights"]``/``["calibration_method"]``/``["calibrator"]``) unchanged, at the base
+    seed, alongside the new ensemble keys the board now scores off of.
     """
-    split = holdout_split()
+    split = holdout_split(train_start_season=frozen.get("train_season_start", TRAIN_START_SEASON))
     train_df = df[df["season"].isin(split.train_seasons)]
     holdout_df = df[df["season"].isin(split.holdout_seasons)]
 
@@ -774,44 +899,66 @@ def holdout_predictions(df: pd.DataFrame, seed: int, frozen: dict) -> pd.DataFra
     logit_cols = frozen["logistic_feature_cols"]
     spw = _scale_pos_weight(train_df["breakout"])
 
-    lgbm_params = dict(frozen["lgbm_params"])
-    lgbm_params["n_estimators"] = frozen["lgbm_final_n_estimators"]
-    lgbm_model = lgb.LGBMClassifier(
-        objective="binary",
-        random_state=seed,
-        deterministic=True,
-        force_row_wise=True,
-        n_jobs=1,
-        verbosity=-1,
-        scale_pos_weight=spw,
-        **lgbm_params,
-    )
-    lgbm_model.fit(train_df[tree_cols], train_df["breakout"])
-    lgbm_pred = lgbm_model.predict_proba(holdout_df[tree_cols])[:, 1]
+    # Backward compatibility: a frozen dict built outside run_full_pipeline's ensemble
+    # path (e.g. src.models.vegas_experiment.promote_position's hand-built dict, which
+    # copies an existing bundle and overrides only a few legacy top-level keys -- out of
+    # this task's scope to rewrite for an ensemble of models) may not carry "per_seed" /
+    # "active_calibration_method" at all. Falling back to a synthetic single-seed
+    # ensemble (the legacy lgbm_params/xgb_params/blend_weights/final_n_estimators, under
+    # the base `seed`) and the legacy calibrator as "active" makes this function accept
+    # both a full v1.7 ensemble frozen dict AND a plain single-model one transparently.
+    per_seed_spec = frozen.get("per_seed") or {
+        seed: {
+            "lgbm_params": frozen["lgbm_params"],
+            "xgb_params": frozen["xgb_params"],
+            "lgbm_final_n_estimators": frozen["lgbm_final_n_estimators"],
+            "xgb_final_n_estimators": frozen["xgb_final_n_estimators"],
+            "blend_weights": frozen["blend_weights"],
+        }
+    }
+    active_calibration_method = frozen.get("active_calibration_method", frozen["calibration_method"])
+    active_calibrator = frozen.get("active_calibrator", frozen["calibrator"])
 
-    xgb_params = dict(frozen["xgb_params"])
-    xgb_params["n_estimators"] = frozen["xgb_final_n_estimators"]
-    xgb_model = xgb.XGBClassifier(objective="binary:logistic", random_state=seed, n_jobs=1, verbosity=0, scale_pos_weight=spw, **xgb_params)
-    xgb_model.fit(train_df[tree_cols], train_df["breakout"])
-    xgb_pred = xgb_model.predict_proba(holdout_df[tree_cols])[:, 1]
-
+    # Shared logistic head: fit once, at the base seed -- unchanged from pre-ensemble.
     logit_model, logit_imputer, logit_scaler = fit_logistic(train_df, holdout_df, logit_cols, frozen["logistic_C"], seed)
     logit_pred = _logistic_predict(logit_model, logit_imputer, logit_scaler, holdout_df, logit_cols)
 
-    blended = apply_blend(frozen["blend_weights"], lgbm=lgbm_pred, xgb=xgb_pred, logistic=logit_pred)
-    calibrated = apply_calibration(frozen["calibration_method"], frozen["calibrator"], blended)
+    per_seed_models: dict[int, dict] = {}
+    per_seed_blend: dict[int, np.ndarray] = {}
+    base_lgbm_pred = base_xgb_pred = base_blend = None
+    for s, info in per_seed_spec.items():
+        lgbm_model = _fit_holdout_lgbm(train_df, tree_cols, info["lgbm_params"], info["lgbm_final_n_estimators"], s, spw)
+        xgb_model = _fit_holdout_xgb(train_df, tree_cols, info["xgb_params"], info["xgb_final_n_estimators"], s, spw)
+        lgbm_pred = lgbm_model.predict_proba(holdout_df[tree_cols])[:, 1]
+        xgb_pred = xgb_model.predict_proba(holdout_df[tree_cols])[:, 1]
+        blended_s = apply_blend(info["blend_weights"], lgbm=lgbm_pred, xgb=xgb_pred, logistic=logit_pred)
+
+        per_seed_models[s] = {"lgbm": lgbm_model, "xgb": xgb_model}
+        per_seed_blend[s] = blended_s
+        if s == seed:
+            base_lgbm_pred, base_xgb_pred, base_blend = lgbm_pred, xgb_pred, blended_s
+
+    ensemble_blend = np.mean(np.vstack(list(per_seed_blend.values())), axis=0)
+    ensemble_calibrated = apply_calibration(active_calibration_method, active_calibrator, ensemble_blend)
+
+    # Legacy single-seed calibration -- unused by the board going forward, kept only so
+    # anything still reading it (none in this repo, belt-and-suspenders) sees a real value.
+    legacy_calibrated = apply_calibration(frozen["calibration_method"], frozen["calibrator"], base_blend)
 
     out = holdout_df[REPORT_ID_COLS].copy()
-    out["pred_lgbm"] = lgbm_pred
-    out["pred_xgb"] = xgb_pred
+    out["pred_lgbm"] = base_lgbm_pred
+    out["pred_xgb"] = base_xgb_pred
     out["pred_logistic"] = logit_pred
-    out["pred_blend_raw"] = blended
-    out["pred_calibrated"] = calibrated
+    out["pred_blend_raw_single_seed"] = base_blend
+    out["pred_calibrated_single_seed"] = legacy_calibrated
+    out["pred_blend_raw"] = ensemble_blend
+    out["pred_calibrated"] = ensemble_calibrated
 
     frozen["_holdout_models"] = {
-        "lgbm": lgbm_model,
-        "xgb": xgb_model,
+        "lgbm": per_seed_models[seed]["lgbm"],
+        "xgb": per_seed_models[seed]["xgb"],
         "logistic": (logit_model, logit_imputer, logit_scaler),
+        "per_seed_models": per_seed_models,
     }
     return out
 
@@ -824,7 +971,7 @@ def holdout_regression_eval(df: pd.DataFrame, seed: int, frozen: dict) -> dict:
     trio — so ``save_artifacts`` can ship a bundle Phase 6 can score 2026 rows with, instead
     of only ever reporting an RMSE and discarding the fitted models.
     """
-    split = holdout_split()
+    split = holdout_split(train_start_season=frozen.get("train_season_start", TRAIN_START_SEASON))
     reg_df = df[df["finish_rank_delta"].notna()]
     train_df = reg_df[reg_df["season"].isin(split.train_seasons)]
     holdout_df = reg_df[reg_df["season"].isin(split.holdout_seasons)]
@@ -885,6 +1032,60 @@ def named_top10(df_subset: pd.DataFrame, season: int, score_col: str) -> pd.Data
     return sub.iloc[idx][cols].reset_index(drop=True)
 
 
+def _adp_worse_than_threshold(label_position: str) -> float:
+    """This position's ``adp_worse_than`` breakout-eligibility threshold, straight off
+
+    ``configs/labels.yaml`` -- the identical gate ``src.labels.build`` uses to define a
+    breakout at all, so ``baselines.eligible_prior_ppg``'s "eligible" pool matches the
+    label's own eligibility rule exactly.
+    """
+    labels_cfg = load_labels_config()
+    return float(labels_cfg["thresholds"][label_position]["adp_worse_than"])
+
+
+def _merge_napkin_logistic(df_subset: pd.DataFrame, napkin_oof: pd.DataFrame) -> pd.Series:
+    """``baselines.napkin_logistic_oof``'s output is (season, gsis_id, score) from a
+
+    separate per-fold loop over the FULL modeling frame, not row-order-aligned to
+    ``df_subset`` (e.g. ``val_full``, itself already the result of an earlier merge) the
+    way every other score in this module is. Left-merges it onto ``df_subset`` by key
+    (preserving ``df_subset``'s row order -- required, since every score this module hands
+    ``evaluate_scores`` is consumed positionally via ``np.asarray``, not by index label) and
+    returns just the score column.
+    """
+    merged = df_subset[["season", "gsis_id"]].merge(napkin_oof, on=["season", "gsis_id"], how="left", sort=False)
+    return merged["score"]
+
+
+def fair_baseline_scores(
+    val_full: pd.DataFrame, holdout_full: pd.DataFrame, df: pd.DataFrame, spec: PositionSpec, folds: list[Fold], split
+) -> tuple[dict, dict]:
+    """v1.7 Step 4: the two "fair baseline" scores (``eligible_prior_ppg``, ``napkin_logistic``)
+
+    over validation (OOF, per fold) and the one holdout pass -- computed here (not in
+    ``baselines.compute_all_baselines``, see that module's docstring) since both need
+    per-fold refitting / an eligibility threshold this module already has on hand.
+    ``val_full``/``holdout_full`` must be the same already-merged, final-row-order frames
+    ``generate_report``/``_metrics_to_jsonable`` hand to ``evaluate_scores`` -- every score
+    returned here is in that exact row order (see ``_merge_napkin_logistic``'s docstring).
+    """
+    adp_worse_than = _adp_worse_than_threshold(spec.label_position)
+
+    val_eligible = bl.eligible_prior_ppg(val_full, adp_worse_than)
+    holdout_eligible = bl.eligible_prior_ppg(holdout_full, adp_worse_than)
+
+    napkin_val_oof = bl.napkin_logistic_oof(df, folds)
+    napkin_val = _merge_napkin_logistic(val_full, napkin_val_oof)
+
+    train_df = df[df["season"].isin(split.train_seasons)]
+    napkin_holdout = bl.napkin_logistic_holdout(train_df, holdout_full)
+
+    return (
+        {"eligible_prior_ppg": val_eligible, "napkin_logistic": napkin_val},
+        {"eligible_prior_ppg": holdout_eligible, "napkin_logistic": napkin_holdout},
+    )
+
+
 # --------------------------------------------------------------------------
 # Full pipeline
 # --------------------------------------------------------------------------
@@ -929,42 +1130,59 @@ def run_full_pipeline(
 
     np.random.seed(seed)
 
+    train_season_start = cfg.get("train_season_start", TRAIN_START_SEASON)
     df = load_modeling_frame(spec.features_path, spec.labels_path, cfg=cfg)
     tree_cols = tree_feature_columns(df, cfg=cfg)
     logit_cols = logistic_feature_columns(cfg)
-    folds = validation_folds()
+    folds = validation_folds(train_start_season=train_season_start)
 
-    # ---- classifier tuning (Optuna: LGBM, XGB; small grid: logistic) ----
-    lgbm_study = tune_classifier(df, tree_cols, folds, "lgbm", cfg, n_trials_clf, seed)
-    xgb_study = tune_classifier(df, tree_cols, folds, "xgb", cfg, n_trials_clf, seed)
+    # ---- v1.7 seed ensemble: cfg["optuna"]["seeds"] (default: just the base `seed`,
+    # so a config that never sets this key behaves exactly like the pre-ensemble
+    # single-seed pipeline) -- one full Optuna search + frozen-param OOF per seed for
+    # LGBM/XGB. The logistic head is NOT ensembled (tuned/fit once, at the base seed,
+    # same as always) -- see tune_and_oof_classifier_head / ensemble_blend_and_pool's
+    # docstrings and the v1.7 brief ("train each seed's best LGBM+XGB (+ the logistic
+    # as before, once)").
+    ensemble_seeds = list(dict.fromkeys(cfg.get("optuna", {}).get("seeds", [seed])))  # de-dup, preserve order
+    if seed not in ensemble_seeds:
+        ensemble_seeds = [seed] + ensemble_seeds  # the base seed must always be present (legacy single-model keys need it)
+
     logit_C, logit_val_score, logit_fold_scores_by_C = tune_logistic(df, logit_cols, folds, cfg, seed)
-
-    lgbm_best_params, xgb_best_params = lgbm_study.best_params, xgb_study.best_params
-
-    # ---- OOF predictions at frozen best params (feeds blend + calibration) ----
-    lgbm_oof, lgbm_fold_metrics, lgbm_best_iters = classifier_oof(df, tree_cols, folds, "lgbm", lgbm_best_params, seed)
-    xgb_oof, xgb_fold_metrics, xgb_best_iters = classifier_oof(df, tree_cols, folds, "xgb", xgb_best_params, seed)
     logit_oof, logit_fold_metrics = logistic_oof(df, logit_cols, folds, logit_C, seed)
 
-    # ---- blend weight grid search on pooled OOF val predictions ----
-    blend_weights, blend_pr_auc, pooled = blend_grid_search({"lgbm": lgbm_oof, "xgb": xgb_oof, "logistic": logit_oof}, cfg["blend"]["grid_step"])
-    pooled["pred_blend"] = apply_blend(blend_weights, lgbm=pooled["pred_lgbm"], xgb=pooled["pred_xgb"], logistic=pooled["pred_logistic"])
+    per_seed = [tune_and_oof_classifier_head(df, tree_cols, folds, cfg, n_trials_clf, s) for s in ensemble_seeds]
+    per_seed, ensemble_pooled = ensemble_blend_and_pool(per_seed, logit_oof, cfg["blend"]["grid_step"])
 
-    # ---- calibration on pooled OOF val predictions of the blend ----
+    # ---- v1.7: Platt scaling on the pooled OOF ENSEMBLE score is the ACTIVE
+    # calibration method (see fit_platt's docstring) -- strictly monotone, so the
+    # displayed ranking is identical to the raw ensemble score's ranking.
+    active_calibrator = fit_platt(ensemble_pooled["breakout"], ensemble_pooled["pred_blend"])
+    ensemble_pooled["pred_calibrated"] = apply_calibration("platt", active_calibrator, ensemble_pooled["pred_blend"])
+
+    # ---- legacy single-(base-)seed pipeline, byte-identical to pre-ensemble: kept
+    # so modules out of this task's scope (src.explain.shap_report,
+    # src.models.vegas_experiment, src.models.overlay_backtest) still get a normal
+    # single-model bundle shape (bundle["lgbm"]/["xgb"]/["blend_weights"]/
+    # ["calibration_method"]/["calibrator"]) -- see holdout_predictions' docstring.
+    base_ps = next(ps for ps in per_seed if ps["seed"] == seed)
+    lgbm_best_params, xgb_best_params = base_ps["lgbm_params"], base_ps["xgb_params"]
+    lgbm_fold_metrics, xgb_fold_metrics = base_ps["lgbm_fold_metrics"], base_ps["xgb_fold_metrics"]
+    lgbm_best_final_n, xgb_best_final_n = base_ps["lgbm_final_n_estimators"], base_ps["xgb_final_n_estimators"]
+    blend_weights, blend_pr_auc = base_ps["blend_weights"], base_ps["blend_pr_auc"]
+    pooled = base_ps["pooled_seed_full"]
+
     calib_method, calibrator, calib_diag = choose_calibration(pooled["breakout"], pooled["pred_blend"])
     pooled["pred_calibrated"] = apply_calibration(calib_method, calibrator, pooled["pred_blend"])
 
     # ---- v1.5: Laplace-smoothed isotonic, fit alongside (never replacing) the
-    # calibration chosen above -- see SmoothedIsotonic's docstring. Persisted
-    # regardless of which method choose_calibration picked, so a position whose
-    # frozen calibration_method is "platt" still carries a usable
-    # smoothed_calibrator (platt doesn't saturate to exact 0/1 the way isotonic
-    # can, but the pooled OOF is worth keeping consistently across positions).
+    # calibration chosen above -- see SmoothedIsotonic's docstring. Fit on the base
+    # seed's pooled OOF (legacy path); still consumed by src.models.overlay_backtest.
     smoothed_calibrator = SmoothedIsotonic().fit(pooled["pred_blend"].to_numpy(), pooled["breakout"].to_numpy())
     pooled["pred_smoothed"] = smoothed_calibrator.predict(pooled["pred_blend"].to_numpy())
     pooled_oof_val = pooled[["season", "gsis_id", "pred_blend", "breakout"]].copy()
 
-    # ---- regression head (separate: RMSE, own Optuna studies) ----
+    # ---- regression head (separate: RMSE, own Optuna studies; not ensembled -- see
+    # module docstring, the v1.7 brief scopes the seed ensemble to the classifier head) ----
     lgbm_reg_study = tune_regressor(df, tree_cols, folds, "lgbm", cfg, n_trials_reg, seed)
     xgb_reg_study = tune_regressor(df, tree_cols, folds, "xgb", cfg, n_trials_reg, seed)
     lgbm_reg_oof, lgbm_reg_fold_metrics, lgbm_reg_best_iters = regressor_oof(df, tree_cols, folds, "lgbm", lgbm_reg_study.best_params, seed)
@@ -974,18 +1192,36 @@ def run_full_pipeline(
     frozen = {
         "tree_feature_cols": tree_cols,
         "logistic_feature_cols": logit_cols,
+        "train_season_start": train_season_start,
+        # -- legacy single-(base-)seed keys, unchanged shape from pre-ensemble --
         "lgbm_params": lgbm_best_params,
         "xgb_params": xgb_best_params,
         "logistic_C": logit_C,
-        "lgbm_final_n_estimators": int(round(np.mean(lgbm_best_iters))),
-        "xgb_final_n_estimators": int(round(np.mean(xgb_best_iters))),
+        "lgbm_final_n_estimators": lgbm_best_final_n,
+        "xgb_final_n_estimators": xgb_best_final_n,
         "blend_weights": blend_weights,
         "calibration_method": calib_method,
         "calibrator": calibrator,
-        # v1.5 -- see SmoothedIsotonic; never overwrites/removes calibration_method/calibrator above.
         "smoothed_calibration_method": "smoothed_isotonic",
         "smoothed_calibrator": smoothed_calibrator,
         "pooled_oof_val": pooled_oof_val,
+        # -- v1.7 seed-ensemble keys --
+        "ensemble_seeds": ensemble_seeds,
+        "per_seed": {
+            ps["seed"]: {
+                "lgbm_params": ps["lgbm_params"],
+                "xgb_params": ps["xgb_params"],
+                "lgbm_final_n_estimators": ps["lgbm_final_n_estimators"],
+                "xgb_final_n_estimators": ps["xgb_final_n_estimators"],
+                "blend_weights": ps["blend_weights"],
+                "blend_pr_auc": ps["blend_pr_auc"],
+            }
+            for ps in per_seed
+        },
+        "pooled_oof_val_ensemble": ensemble_pooled[["season", "gsis_id", "breakout", "pred_blend", "pred_calibrated"]].copy(),
+        "active_calibration_method": "platt",
+        "active_calibrator": active_calibrator,
+        # -- regression head (unensembled) --
         "lgbm_reg_params": lgbm_reg_study.best_params,
         "xgb_reg_params": xgb_reg_study.best_params,
         "lgbm_reg_final_n_estimators": int(round(np.mean(lgbm_reg_best_iters))),
@@ -1002,14 +1238,16 @@ def run_full_pipeline(
         "spec": spec,
         "cfg": cfg,
         "seed": seed,
+        "ensemble_seeds": ensemble_seeds,
+        "per_seed": frozen["per_seed"],
         "n_trials_clf": n_trials_clf,
         "n_trials_reg": n_trials_reg,
         "df": df,
         "tree_cols": tree_cols,
         "logit_cols": logit_cols,
         "folds": folds,
-        "lgbm_study": lgbm_study,
-        "xgb_study": xgb_study,
+        "lgbm_study": base_ps["lgbm_study"],
+        "xgb_study": base_ps["xgb_study"],
         "logit_C": logit_C,
         "logit_val_score": logit_val_score,
         "logit_fold_scores_by_C": logit_fold_scores_by_C,
@@ -1018,9 +1256,11 @@ def run_full_pipeline(
         "logit_fold_metrics": logit_fold_metrics,
         "blend_weights": blend_weights,
         "blend_pr_auc": blend_pr_auc,
-        "pooled_val": pooled,
-        "calib_method": calib_method,
+        "pooled_val": ensemble_pooled,
+        "pooled_val_single_seed": pooled,
+        "calib_method": "platt",
         "calib_diag": calib_diag,
+        "legacy_calib_method": calib_method,
         "lgbm_reg_study": lgbm_reg_study,
         "xgb_reg_study": xgb_reg_study,
         "lgbm_reg_fold_metrics": lgbm_reg_fold_metrics,
@@ -1104,11 +1344,16 @@ def backfill_smoothed_calibration(spec: PositionSpec) -> dict:
 # --------------------------------------------------------------------------
 
 _MODEL_LABEL = {
-    "model": "**Model (blend, calibrated)**",
+    "model": "**Model (v1.7: seed-ensemble, Platt-calibrated)**",
     "adp_knows_best": "Baseline 1: ADP-knows-best",
     "prior_season_ppg_rank": "Baseline 2: prior-season ppg rank",
     "age_adjusted_adp": "Baseline 3: age-adjusted ADP",
+    "eligible_prior_ppg": "Baseline 4: eligible-prior-ppg (v1.7)",
+    "napkin_logistic": "Baseline 5: napkin logistic (v1.7)",
 }
+_MODEL_KEYS_IN_ORDER = (
+    "model", "adp_knows_best", "prior_season_ppg_rank", "age_adjusted_adp", "eligible_prior_ppg", "napkin_logistic",
+)
 
 
 def _fmt(v, nd: int = 3) -> str:
@@ -1132,7 +1377,7 @@ def _metrics_table_markdown(metrics_df: pd.DataFrame, seasons: list) -> str:
     headers = ["Model", "Season", "n", "n_pos", "PR-AUC", "Brier", "Top-10 precision"]
     rows = []
     for season in list(seasons) + ["pooled"]:
-        for model_key in ["model", "adp_knows_best", "prior_season_ppg_rank", "age_adjusted_adp"]:
+        for model_key in _MODEL_KEYS_IN_ORDER:
             r = metrics_df[(metrics_df["season"] == season) & (metrics_df["model"] == model_key)]
             if r.empty:
                 continue
@@ -1167,18 +1412,31 @@ def generate_report(result: dict, pytest_summary: str | None = None) -> str:
     pooled = result["pooled_val"]
     holdout_preds = result["holdout_preds"]
 
-    val_full = df[df["season"].isin(VALIDATION_SEASONS)].merge(
+    # v1.7: a position whose config restricts train_season_start (e.g. 2020) also runs
+    # fewer validation folds (see cv.validation_folds' MIN_FOLD_TRAIN_YEARS rule) -- the
+    # module-level VALIDATION_SEASONS constant (2020-2023) is no longer necessarily what
+    # this run actually validated against, so every "validation" season list in this
+    # function is derived from result["folds"] (what actually ran), not that constant.
+    effective_val_seasons = sorted({f.val_season for f in result["folds"]})
+
+    val_full = df[df["season"].isin(effective_val_seasons)].merge(
         pooled[["season", "gsis_id", "pred_calibrated"]], on=["season", "gsis_id"], how="left"
     )
     assert val_full["pred_calibrated"].notna().all(), "every validation row must have a pooled OOF prediction"
-    val_scores = {"model": val_full["pred_calibrated"], **bl.compute_all_baselines(val_full, cfg)}
-    val_metrics = evaluate_scores(val_full, val_scores, list(VALIDATION_SEASONS), brier_names=frozenset({"model"}))
-
     holdout_full = df[df["season"].isin(HOLDOUT_SEASONS)].merge(
         holdout_preds[["season", "gsis_id", "pred_calibrated"]], on=["season", "gsis_id"], how="left"
     )
     assert holdout_full["pred_calibrated"].notna().all(), "every holdout row must have a prediction"
-    holdout_scores = {"model": holdout_full["pred_calibrated"], **bl.compute_all_baselines(holdout_full, cfg)}
+
+    # v1.7 Step 4: two more baselines (eligible_prior_ppg, napkin_logistic) alongside the
+    # original three -- see fair_baseline_scores' docstring.
+    split = holdout_split(train_start_season=result["frozen"].get("train_season_start", TRAIN_START_SEASON))
+    fair_val, fair_holdout = fair_baseline_scores(val_full, holdout_full, df, spec, result["folds"], split)
+
+    val_scores = {"model": val_full["pred_calibrated"], **bl.compute_all_baselines(val_full, cfg), **fair_val}
+    val_metrics = evaluate_scores(val_full, val_scores, effective_val_seasons, brier_names=frozenset({"model"}))
+
+    holdout_scores = {"model": holdout_full["pred_calibrated"], **bl.compute_all_baselines(holdout_full, cfg), **fair_holdout}
     holdout_metrics = evaluate_scores(holdout_full, holdout_scores, list(HOLDOUT_SEASONS), brier_names=frozenset({"model"}))
 
     decile = mt.calibration_decile_table(val_full["breakout"], val_full["pred_calibrated"])
@@ -1195,13 +1453,26 @@ def generate_report(result: dict, pytest_summary: str | None = None) -> str:
     beats_top10 = model_top10 > base2_top10
     beats_prauc = model_prauc > base2_prauc
     verdict = (
-        f"**Verdict:** on the HOLDOUT years (2024+2025 pooled), the model "
-        f"{'BEATS' if beats_top10 else 'DOES NOT beat'} baseline 2 (prior-season ppg rank) on top-10 precision "
-        f"({model_top10:.3f} vs {base2_top10:.3f}, delta {model_top10 - base2_top10:+.3f}) and "
+        f"**Verdict:** on the HOLDOUT years (2024+2025 pooled), the v1.7 model (seed-ensemble, "
+        f"Platt-calibrated) {'BEATS' if beats_top10 else 'DOES NOT beat'} baseline 2 (prior-season ppg rank) "
+        f"on top-10 precision ({model_top10:.3f} vs {base2_top10:.3f}, delta {model_top10 - base2_top10:+.3f}) and "
         f"{'BEATS' if beats_prauc else 'DOES NOT beat'} it on PR-AUC "
         f"({model_prauc:.3f} vs {base2_prauc:.3f}, delta {model_prauc - base2_prauc:+.3f}). "
         + ("Both this run's holdout numbers are reported as-is, from the single frozen holdout evaluation -- no retuning followed." )
     )
+
+    # v1.7 Step 4: no promotion logic -- report plainly whether the model beats EITHER
+    # of the two "fair" baselines (eligible_prior_ppg, napkin_logistic) on holdout top-10.
+    fair_verdict_parts = []
+    for fair_name, fair_label in (("eligible_prior_ppg", "eligible-prior-ppg"), ("napkin_logistic", "napkin-logistic")):
+        fair_top10 = pooled_row("top10_precision", fair_name)
+        fair_prauc = pooled_row("pr_auc", fair_name)
+        fair_verdict_parts.append(
+            f"{'beats' if model_top10 > fair_top10 else 'DOES NOT beat'} {fair_label} on top-10 precision "
+            f"({model_top10:.3f} vs {fair_top10:.3f}) and "
+            f"{'beats' if model_prauc > fair_prauc else 'DOES NOT beat'} it on PR-AUC ({model_prauc:.3f} vs {fair_prauc:.3f})"
+        )
+    fair_verdict = "**Fair-baseline verdict:** on the same holdout years, the model " + "; and ".join(fair_verdict_parts) + "."
 
     lgbm_space = cfg["search_space"]["lgbm"]
     xgb_space = cfg["search_space"]["xgb"]
@@ -1212,11 +1483,14 @@ def generate_report(result: dict, pytest_summary: str | None = None) -> str:
 
     pool_n = len(df)
     pos_rates = df.groupby("season")["breakout"].mean()
+    train_season_start_val = result["frozen"].get("train_season_start", TRAIN_START_SEASON)
 
     lines = []
-    lines.append(f"# BreakoutLab -- {spec.label_position} Model Report (Phase 4)")
+    lines.append(f"# BreakoutLab -- {spec.label_position} Model Report (v1.7 fixes)")
     lines.append("")
     lines.append(verdict)
+    lines.append("")
+    lines.append(fair_verdict)
     lines.append("")
     lines.append(
         f"{pool_n:,} rows in the {spec.label_position} training pool (in_training_pool==1, "
@@ -1227,9 +1501,38 @@ def generate_report(result: dict, pytest_summary: str | None = None) -> str:
     )
     lines.append("")
 
-    lines.append("## Validation: per-fold + pooled (2020-2023)")
+    lines.append("## v1.7 changes: training pool, seed ensemble, calibration")
     lines.append("")
-    lines.append(_metrics_table_markdown(val_metrics, list(VALIDATION_SEASONS)))
+    lines.append(
+        f"- **Training pool** (Step 1, proxy-era sensitivity, `outputs/proxy_sensitivity.md`): "
+        f"`train_season_start`={train_season_start_val} -- "
+        + ("the full 2014-2025 pool (Arm A kept)." if train_season_start_val <= TRAIN_START_SEASON
+           else f"restricted to season >= {train_season_start_val} (Arm B adopted: real-market-ECR-only labels).")
+    )
+    lines.append(
+        f"- **Seed ensemble** (Step 2): `optuna.seeds`={result['ensemble_seeds']} -- LGBM+XGB tuned/OOF'd once per "
+        "seed (own frozen hyperparameters, own blend weights against the one shared logistic head), the model's "
+        "raw score is the mean of every seed's blended score. Determinism: byte-identical reruns at a fixed seed list."
+    )
+    lines.append(
+        f"- **Calibration** (Step 3): active method is **Platt** (`{result['calib_method']}`) on the pooled OOF "
+        f"ensemble score -- strictly monotone, so the calibrated ranking is identical to the raw-score ranking by "
+        f"construction. The legacy isotonic/Platt-fallback choice (`{result['legacy_calib_method']}`, on the base "
+        "seed's single-model OOF) and v1.5's SmoothedIsotonic are both still fit and stored, never deleted -- see "
+        "`src/models/train.py`'s `choose_calibration`/`SmoothedIsotonic`."
+    )
+    lines.append(
+        "- **Board renormalization** (Step 3, presentation-layer only, `src/inference/board_2026.py`): displayed "
+        "2026 probabilities are rescaled per position so they sum to that position's historical mean per-season "
+        "breakout count -- a calibrated probability is only ever calibrated against its own validation pool, "
+        "nothing forces the sum to match real per-season breakout counts. Not reflected in this report's holdout "
+        "metrics (rank-based, invariant to any monotone rescale) -- see the README's v1.7 section."
+    )
+    lines.append("")
+
+    lines.append(f"## Validation: per-fold + pooled ({effective_val_seasons[0]}-{effective_val_seasons[-1]})")
+    lines.append("")
+    lines.append(_metrics_table_markdown(val_metrics, effective_val_seasons))
     lines.append("")
     lines.append("### Fold-level spread (classifier trio, frozen best params)")
     lines.append("")
@@ -1318,21 +1621,26 @@ def generate_report(result: dict, pytest_summary: str | None = None) -> str:
 
 
 def _metrics_to_jsonable(result: dict) -> dict:
+    spec: PositionSpec = result["spec"]
     cfg = result["cfg"]
     df = result["df"]
     pooled = result["pooled_val"]
     holdout_preds = result["holdout_preds"]
+    effective_val_seasons = sorted({f.val_season for f in result["folds"]})
 
-    val_full = df[df["season"].isin(VALIDATION_SEASONS)].merge(
+    val_full = df[df["season"].isin(effective_val_seasons)].merge(
         pooled[["season", "gsis_id", "pred_calibrated"]], on=["season", "gsis_id"], how="left"
     )
-    val_scores = {"model": val_full["pred_calibrated"], **bl.compute_all_baselines(val_full, cfg)}
-    val_metrics = evaluate_scores(val_full, val_scores, list(VALIDATION_SEASONS), brier_names=frozenset({"model"}))
-
     holdout_full = df[df["season"].isin(HOLDOUT_SEASONS)].merge(
         holdout_preds[["season", "gsis_id", "pred_calibrated"]], on=["season", "gsis_id"], how="left"
     )
-    holdout_scores = {"model": holdout_full["pred_calibrated"], **bl.compute_all_baselines(holdout_full, cfg)}
+    split = holdout_split(train_start_season=result["frozen"].get("train_season_start", TRAIN_START_SEASON))
+    fair_val, fair_holdout = fair_baseline_scores(val_full, holdout_full, df, spec, result["folds"], split)
+
+    val_scores = {"model": val_full["pred_calibrated"], **bl.compute_all_baselines(val_full, cfg), **fair_val}
+    val_metrics = evaluate_scores(val_full, val_scores, effective_val_seasons, brier_names=frozenset({"model"}))
+
+    holdout_scores = {"model": holdout_full["pred_calibrated"], **bl.compute_all_baselines(holdout_full, cfg), **fair_holdout}
     holdout_metrics = evaluate_scores(holdout_full, holdout_scores, list(HOLDOUT_SEASONS), brier_names=frozenset({"model"}))
 
     def _records(d: pd.DataFrame) -> list[dict]:
@@ -1341,11 +1649,14 @@ def _metrics_to_jsonable(result: dict) -> dict:
     return {
         "position": result["spec"].position,
         "seed": result["seed"],
+        "ensemble_seeds": result["ensemble_seeds"],
+        "train_season_start": result["frozen"].get("train_season_start", TRAIN_START_SEASON),
         "validation_metrics": _records(val_metrics),
         "holdout_metrics": _records(holdout_metrics),
         "blend_weights": result["blend_weights"],
         "blend_pooled_val_pr_auc": result["blend_pr_auc"],
         "calibration_method": result["calib_method"],
+        "legacy_calibration_method": result["legacy_calib_method"],
         "calibration_diagnostics": result["calib_diag"],
         "lgbm_classifier_params": result["frozen"]["lgbm_params"],
         "xgb_classifier_params": result["frozen"]["xgb_params"],

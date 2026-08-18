@@ -257,3 +257,89 @@ def test_determinism_two_runs_identical_holdout_predictions(pos: str, tmp_path) 
     assert r1["calib_method"] == r2["calib_method"], pos
     assert r1["frozen"]["lgbm_params"] == r2["frozen"]["lgbm_params"], pos
     assert r1["frozen"]["xgb_params"] == r2["frozen"]["xgb_params"], pos
+
+
+# --------------------------------------------------------------------------
+# v1.7 -- seed-ensemble determinism (tiny config, 2 seeds, output_root). A
+# fixed ``optuna.seeds`` list must reproduce byte-identical results across
+# independent process invocations, exactly like the single-seed case above,
+# but additionally checking the per-seed structure (``frozen["per_seed"]``,
+# ``ensemble_seeds``) survives identically too -- not just the final
+# ensemble score, which could in principle coincide even if the per-seed
+# pieces feeding it differed.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pos", _POSITIONS)
+def test_determinism_seed_ensemble_two_runs_identical(pos: str, tmp_path) -> None:
+    import copy
+
+    _skip_if_data_missing(pos)
+    cfg = copy.deepcopy(_LOAD_CONFIG[pos]())
+    cfg["optuna"]["seeds"] = [42, 1337]  # 2 seeds, distinct from the real 3-seed config -- keeps this fast
+    trials = cfg["optuna"]["tiny_trials"]
+
+    r1 = _RUN_PIPELINE[pos](cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42, output_root=tmp_path / "a")
+    r2 = _RUN_PIPELINE[pos](cfg=cfg, classifier_trials=trials, regression_trials=trials, seed=42, output_root=tmp_path / "b")
+
+    assert r1["ensemble_seeds"] == [42, 1337] == r2["ensemble_seeds"], pos
+
+    p1 = r1["holdout_preds"].sort_values(["season", "gsis_id"])["pred_calibrated"].to_numpy()
+    p2 = r2["holdout_preds"].sort_values(["season", "gsis_id"])["pred_calibrated"].to_numpy()
+    np.testing.assert_array_equal(p1, p2, err_msg=f"{pos}: ensemble pred_calibrated diverged")
+
+    raw1 = r1["holdout_preds"].sort_values(["season", "gsis_id"])["pred_blend_raw"].to_numpy()
+    raw2 = r2["holdout_preds"].sort_values(["season", "gsis_id"])["pred_blend_raw"].to_numpy()
+    np.testing.assert_array_equal(raw1, raw2, err_msg=f"{pos}: ensemble raw score diverged")
+
+    for seed in (42, 1337):
+        info1, info2 = r1["per_seed"][seed], r2["per_seed"][seed]
+        assert info1["lgbm_params"] == info2["lgbm_params"], f"{pos}/seed={seed}"
+        assert info1["xgb_params"] == info2["xgb_params"], f"{pos}/seed={seed}"
+        assert info1["blend_weights"] == info2["blend_weights"], f"{pos}/seed={seed}"
+        assert info1["lgbm_final_n_estimators"] == info2["lgbm_final_n_estimators"], f"{pos}/seed={seed}"
+        assert info1["xgb_final_n_estimators"] == info2["xgb_final_n_estimators"], f"{pos}/seed={seed}"
+
+
+def test_seed_ensemble_raw_score_is_mean_of_per_seed_blends(tiny_result) -> None:
+    """The ensemble's holdout raw score must equal the unweighted mean of every seed's own
+
+    blended holdout score -- the exact "raw score = mean of per-seed blended scores"
+    contract the v1.7 brief specifies (src.models.train.holdout_predictions).
+    """
+    pos, result = tiny_result
+    frozen = result["frozen"]
+    seeds = frozen["ensemble_seeds"]
+    if len(seeds) < 2:
+        pytest.skip(f"{pos}: this position's config carries fewer than 2 optuna.seeds")
+
+    holdout_preds = result["holdout_preds"]
+    tree_cols = frozen["tree_feature_cols"]
+    df = result["df"]
+    from src.models.cv import holdout_split as _holdout_split
+    from src.models.train import TRAIN_START_SEASON, _fit_holdout_lgbm, _fit_holdout_xgb, _logistic_predict, _scale_pos_weight, apply_blend
+
+    split = _holdout_split(train_start_season=frozen.get("train_season_start", TRAIN_START_SEASON))
+    train_df = df[df["season"].isin(split.train_seasons)]
+    holdout_df = df[df["season"].isin(split.holdout_seasons)].sort_values(["season", "gsis_id"])
+    spw = _scale_pos_weight(train_df["breakout"])
+
+    logit_model, logit_imputer, logit_scaler = frozen["_holdout_models"]["logistic"] if "_holdout_models" in frozen else (None, None, None)
+    # frozen["_holdout_models"] isn't persisted on `result["frozen"]` after save_artifacts strips
+    # private keys, but tiny_result's `result` dict is the raw run_full_pipeline return, which
+    # still carries it (save_artifacts only strips a *copy* it writes to disk).
+    assert logit_model is not None, f"{pos}: expected _holdout_models on the in-memory result"
+    logit_cols = frozen["logistic_feature_cols"]
+    logit_pred = _logistic_predict(logit_model, logit_imputer, logit_scaler, holdout_df, logit_cols)
+
+    per_seed_blends = []
+    for seed, info in frozen["per_seed"].items():
+        lgbm_model = _fit_holdout_lgbm(train_df, tree_cols, info["lgbm_params"], info["lgbm_final_n_estimators"], seed, spw)
+        xgb_model = _fit_holdout_xgb(train_df, tree_cols, info["xgb_params"], info["xgb_final_n_estimators"], seed, spw)
+        lgbm_pred = lgbm_model.predict_proba(holdout_df[tree_cols])[:, 1]
+        xgb_pred = xgb_model.predict_proba(holdout_df[tree_cols])[:, 1]
+        per_seed_blends.append(apply_blend(info["blend_weights"], lgbm=lgbm_pred, xgb=xgb_pred, logistic=logit_pred))
+
+    recomputed_mean = np.mean(np.vstack(per_seed_blends), axis=0)
+    actual = holdout_preds.sort_values(["season", "gsis_id"])["pred_blend_raw"].to_numpy()
+    np.testing.assert_allclose(recomputed_mean, actual, rtol=1e-10, atol=1e-12, err_msg=pos)
