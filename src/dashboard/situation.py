@@ -57,6 +57,13 @@ _USAGE = {
 _DEPARTURE_MIN_SHARE = 0.10
 _COMPETITION_MIN_USAGE = {"QB": 200, "RB": 80, "WR": 50, "TE": 40}
 
+# RB receiving volume (PPR-relevant) rides along everywhere: it is APPENDED
+# to RB usage strings when material, and can QUALIFY an RB departure or
+# competitor on its own -- a 30-carry satellite back with 70 targets is a
+# real loss/threat that a carries-only gate would miss.
+_RB_RECEIVING_MENTION_MIN = 20  # targets: append ", plus N targets" at/above this
+_RB_RECEIVING_QUALIFY_MIN = 50  # targets: qualifies departure/competition alone
+
 
 def _load_frames() -> tuple[pl.DataFrame, pl.DataFrame]:
     ps = pl.read_parquet(RAW_DIR / "player_stats.parquet")
@@ -99,7 +106,20 @@ def _fmt_usage(row: dict, pos: str) -> str:
     parts = [_plural(int(row[usage_col]), usage_noun)]
     if td_col and row[td_col]:
         parts.append(_plural(int(row[td_col]), td_noun))
-    return " and ".join(parts)
+    out = " and ".join(parts)
+    if pos == "RB":
+        out += _rb_receiving_suffix(row)
+    return out
+
+
+def _rb_receiving_suffix(row: dict) -> str:
+    """", plus N targets [and M receiving TDs]" when an RB's receiving work is material."""
+    if row["targets"] < _RB_RECEIVING_MENTION_MIN:
+        return ""
+    suffix = f", plus {_plural(int(row['targets']), 'targets')}"
+    if row["receiving_tds"]:
+        suffix += f" and {_plural(int(row['receiving_tds']), 'receiving TDs')}"
+    return suffix
 
 
 def build_situations(board: pd.DataFrame) -> dict[str, list[str]]:
@@ -158,14 +178,18 @@ def build_situations(board: pd.DataFrame) -> dict[str, list[str]]:
             if now == team:
                 continue  # still on the roster
             share = (r[usage_col] / r[total_key]) if r[total_key] else 0.0
-            if share >= _DEPARTURE_MIN_SHARE:
+            rb_receiving_qualifies = pos == "RB" and r["targets"] >= _RB_RECEIVING_QUALIFY_MIN
+            if share >= _DEPARTURE_MIN_SHARE or rb_receiving_qualifies:
                 departed.append((share, r, now))
-        departed.sort(key=lambda x: -x[0])
+        # Sort by total PPR-relevant opportunity (carries + targets for RBs;
+        # share alone would bury a low-carry, high-target satellite back).
+        departed.sort(key=lambda x: -(x[1][usage_col] + (x[1]["targets"] if pos == "RB" else 0)))
         for share, r, now in departed[:2]:
             dest = f"to {now}" if now else "(unsigned)"
             tds = f" and {_plural(int(r[td_col]), td_noun)}" if td_col and r[td_col] else ""
+            recv = _rb_receiving_suffix(r) if pos == "RB" else ""
             lines.append(
-                f"{r['name']} left {dest} -- {share:.0%} of the team's 2025 {usage_noun}{tds} up for grabs."
+                f"{r['name']} left {dest} -- {share:.0%} of the team's 2025 {usage_noun}{tds}{recv} up for grabs."
             )
 
         # 3. NEW COMPETITION at his position
@@ -175,9 +199,12 @@ def build_situations(board: pd.DataFrame) -> dict[str, list[str]]:
                 continue
             if team_2026.get(r["gsis_id"]) != team:
                 continue
-            if r[usage_col] >= _COMPETITION_MIN_USAGE[pos]:
+            qualifies = r[usage_col] >= _COMPETITION_MIN_USAGE[pos] or (
+                pos == "RB" and r["targets"] >= _RB_RECEIVING_QUALIFY_MIN
+            )
+            if qualifies:
                 arrivals.append(r)
-        arrivals.sort(key=lambda r: -r[usage_col])
+        arrivals.sort(key=lambda r: -(r[usage_col] + (r["targets"] if pos == "RB" else 0)))
         for r in arrivals[:2]:
             lines.append(
                 f"New competition: {r['name']} arrived from {r['team']} ({_fmt_usage(r, pos)} in 2025)."
