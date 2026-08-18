@@ -623,12 +623,91 @@ def build_quantile_trust() -> dict:
     return out
 
 
+def backtest_top10_lists() -> dict:
+    """{pos: {season: {"model": [...], "actual": [...]}}} -- the two sides of the backtest.
+
+    "model": the holdout-time model's top-10 by calibrated probability (same rows the
+    report's named lists show), each annotated with how the player actually finished.
+    "actual": the players who ACTUALLY finished top-10 at the position that season
+    (labels.parquet finish_pos_rank <= 10, min-8-games basis), each annotated with
+    where the holdout-time model ranked him ("model_rank", 1 = the model's favorite)
+    and his preseason market rank. A finisher the model never scored (rookie, or a
+    thin-sample row outside the training pool) carries model_rank=None -- displayed
+    honestly as "not scored" rather than silently dropped.
+
+    Reads outputs/model_{pos}_holdout_predictions.csv (persisted by src.models.train's
+    report step, v2.6) -- the honest <=2023-fit predictions -- NEVER the shipped final
+    bundle, which is trained through 2025 and would leak onto these years.
+    """
+    labels = pl.read_parquet(train.LABELS_PATH)
+    # Breakout eligibility thresholds (configs/labels.yaml): a finisher whose
+    # preseason expectation rank was BETTER than adp_worse_than was never a
+    # breakout candidate at all -- the model ranks only the cheap pool, so
+    # showing "model had him #100" for a player priced WR1 would misread as a
+    # miss. Those rows get eligible=False and the UI explains instead.
+    thresholds = load_labels_config()["thresholds"]
+    out: dict[str, dict] = {}
+    for pos in POSITIONS:
+        csv_path = OUTPUTS_DIR / f"model_{pos}_holdout_predictions.csv"
+        if not csv_path.exists():
+            continue
+        preds = pd.read_csv(csv_path)
+        pos_out: dict[str, dict] = {}
+        for season in (2024, 2025):
+            sub = preds[preds["season"] == season].sort_values("pred_calibrated", ascending=False)
+            if sub.empty:
+                continue
+            sub = sub.reset_index(drop=True)
+            model_rank = {g: i + 1 for i, g in enumerate(sub["gsis_id"])}
+            by_gsis = sub.set_index("gsis_id")
+
+            model_list = [
+                {
+                    "player": r["player_name"],
+                    "prob": round(float(r["pred_calibrated"]), 4),
+                    "exp_rank": None if pd.isna(r["expectation_pos_rank"]) else int(r["expectation_pos_rank"]),
+                    "finish_rank": None if pd.isna(r["finish_pos_rank"]) else int(r["finish_pos_rank"]),
+                    "breakout": bool(r["breakout"]),
+                }
+                for _, r in sub.head(10).iterrows()
+            ]
+
+            actual = labels.filter(
+                (pl.col("season") == season)
+                & (pl.col("position") == pos.upper())
+                & (pl.col("finish_pos_rank") <= 10)
+            ).sort("finish_pos_rank")
+            actual_list = []
+            for r in actual.to_dicts():
+                g = r["gsis_id"]
+                exp = None if r["expectation_pos_rank"] is None else int(r["expectation_pos_rank"])
+                adp_gate = thresholds[pos.upper()]["adp_worse_than"]
+                actual_list.append(
+                    {
+                        "player": r["player_name"],
+                        "finish_rank": int(r["finish_pos_rank"]),
+                        "exp_rank": exp,
+                        "model_rank": model_rank.get(g),
+                        "prob": round(float(by_gsis.loc[g, "pred_calibrated"]), 4) if g in model_rank else None,
+                        "rookie": bool(r["is_rookie"]),
+                        "breakout": bool(r["breakout"]),
+                        # False = was priced better than the breakout gate preseason --
+                        # never in the model's scope, by the label definition itself.
+                        "eligible": exp is None or exp >= adp_gate,
+                    }
+                )
+            pos_out[str(season)] = {"model": model_list, "actual": actual_list, "n_scored": int(len(sub))}
+        if pos_out:
+            out[pos] = pos_out
+    return out
+
+
 def build_trust_view() -> tuple[dict, dict]:
     """(trust_payload, report_dict) -- report_dict is for main()'s printed report,
 
     not embedded in the page.
     """
-    trust = {"positions": {}, "named_lists": {}, "quantile": build_quantile_trust()}
+    trust = {"positions": {}, "named_lists": {}, "quantile": build_quantile_trust(), "backtest_top10": backtest_top10_lists()}
     report = {}
     for pos in POSITIONS:
         spec = train.position_spec(pos)

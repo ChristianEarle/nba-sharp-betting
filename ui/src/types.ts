@@ -117,10 +117,38 @@ export interface NamedListEntry {
   hit: boolean;
 }
 
+export interface BacktestModelPick {
+  player: string;
+  prob: number;
+  exp_rank: number | null;
+  finish_rank: number | null;
+  breakout: boolean;
+}
+
+export interface BacktestActualFinisher {
+  player: string;
+  finish_rank: number;
+  exp_rank: number | null;
+  /** Where the holdout-time model ranked him (1 = its favorite); null = never scored (rookie / outside pool). */
+  model_rank: number | null;
+  prob: number | null;
+  rookie: boolean;
+  breakout: boolean;
+  /** false = priced better than the breakout gate preseason; never in the model's scope. */
+  eligible: boolean;
+}
+
+export interface BacktestSeason {
+  model: BacktestModelPick[];
+  actual: BacktestActualFinisher[];
+  n_scored: number;
+}
+
 export interface Trust {
   positions: Record<string, TrustPositionEntry>;
   named_lists: Record<string, Record<string, NamedListEntry[]>>;
   quantile: Record<string, QuantileTrustEntry>;
+  backtest_top10?: Record<string, Record<string, BacktestSeason>>;
 }
 
 export interface Meta {

@@ -211,34 +211,81 @@ export function TrustView({ payload }: Props) {
 
       <h2 className="section-h2">Named holdout top-10 lists, 2024 &amp; 2025</h2>
       <p className="vsub" style={{ marginBottom: 8 }}>
-        The model's actual top-10 cheap-price picks each holdout year, and whether each one really broke out. ✓ =
-        hit.
+        Two sides of the same backtest, per year: the model's ten best cheap-price picks (✓ = actually broke out),
+        and — new — the ten players who actually finished top-10 at the position, with where the model had ranked
+        each one before the season. "not scored" = the model never rated him (rookie, or too thin a prior season).
       </p>
       {POS_ORDER.map((pos) => {
+        const bt = trust.backtest_top10?.[pos.toLowerCase()];
         const nl = trust.named_lists[pos.toLowerCase()];
-        if (!nl) return null;
+        if (!bt && !nl) return null;
         return (
           <div key={pos}>
             <h3 className="section-h3">{pos}</h3>
-            <div className="namedlist">
-              {["2024", "2025"].map((yr) => {
-                const rows = nl[yr] || [];
+            {["2024", "2025"].map((yr) => {
+              const season = bt?.[yr];
+              if (!season) {
+                const rows = nl?.[yr] || [];
+                if (!rows.length) return null;
                 return (
-                  <div className="yr" key={yr}>
-                    <h3>{yr}</h3>
-                    {rows.map((p, i) => (
-                      <div className={`hitrow${p.hit ? " hit" : ""}`} key={`${p.player}-${i}`}>
-                        <span>
-                          {p.hit && <span className="chk">✓</span>}
-                          {p.player}
-                        </span>
-                        <span className="hm">{pct(p.prob)}</span>
-                      </div>
-                    ))}
+                  <div className="namedlist" key={yr}>
+                    <div className="yr">
+                      <h3>{yr}</h3>
+                      {rows.map((p, i) => (
+                        <div className={`hitrow${p.hit ? " hit" : ""}`} key={`${p.player}-${i}`}>
+                          <span>
+                            {p.hit && <span className="chk">✓</span>}
+                            {p.player}
+                          </span>
+                          <span className="hm">{pct(p.prob)}</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 );
-              })}
-            </div>
+              }
+              return (
+                <div className="backtest-yr" key={yr}>
+                  <h3 className="backtest-yr-h">{yr}</h3>
+                  <div className="backtest-cols">
+                    <div className="yr">
+                      <h3>Model's top-10 picks</h3>
+                      {season.model.map((p, i) => (
+                        <div className={`hitrow${p.breakout ? " hit" : ""}`} key={`${p.player}-${i}`}>
+                          <span>
+                            {p.breakout && <span className="chk">✓</span>}
+                            {p.player}
+                          </span>
+                          <span className="hm">
+                            {p.finish_rank != null ? `finished ${pos}${p.finish_rank}` : "n/a (<8 gms)"} · {pct(p.prob)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="yr">
+                      <h3>Actually finished top-10</h3>
+                      {season.actual.map((p, i) => (
+                        <div className={`hitrow${p.model_rank != null && p.model_rank <= 10 ? " hit" : ""}`} key={`${p.player}-${i}`}>
+                          <span>
+                            {p.model_rank != null && p.model_rank <= 10 && <span className="chk">✓</span>}
+                            {pos}{p.finish_rank} {p.player}
+                          </span>
+                          <span className="hm">
+                            {!p.eligible
+                              ? `priced ${pos}${p.exp_rank} — outside breakout scope`
+                              : p.model_rank == null
+                                ? p.rookie
+                                  ? "not scored (rookie)"
+                                  : "not scored"
+                                : `model had him #${p.model_rank} of ${season.n_scored}`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         );
       })}

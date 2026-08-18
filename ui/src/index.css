@@ -1173,3 +1173,15 @@ section.reading h2 {
   line-height: 1.45;
   color: var(--ink-soft, inherit);
 }
+
+/* v2.6: side-by-side backtest lists (model picks vs actual finishers) */
+.backtest-yr { margin: 10px 0 14px; }
+.backtest-yr-h { font-size: 13px; margin: 0 0 6px; opacity: 0.75; }
+.backtest-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+@media (max-width: 700px) {
+  .backtest-cols { grid-template-columns: 1fr; }
+}

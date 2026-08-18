@@ -1441,6 +1441,21 @@ def generate_report(result: dict, pytest_summary: str | None = None) -> str:
 
     decile = mt.calibration_decile_table(val_full["breakout"], val_full["pred_calibrated"])
 
+    # v2.6: persist the FULL holdout prediction vector (not just the top-10 tables
+    # below) so downstream surfaces (the dashboard's backtest view) can show where
+    # the holdout-time model ranked ANY player -- e.g. each actual top-10 finisher --
+    # without re-running training or leaking the final (<=2025-trained) bundle onto
+    # holdout years. These are the honest <=2023-fit predictions, same frame the
+    # named lists and every holdout metric in this report are computed from.
+    holdout_csv_cols = [
+        "season", "gsis_id", "player_name", "pred_calibrated",
+        "expectation_pos_rank", "finish_pos_rank", "breakout",
+    ]
+    holdout_csv_path = spec.report_path.parent / f"model_{spec.position}_holdout_predictions.csv"
+    holdout_full[holdout_csv_cols].sort_values(
+        ["season", "pred_calibrated"], ascending=[True, False]
+    ).to_csv(holdout_csv_path, index=False)
+
     top10_2024 = named_top10(holdout_full, 2024, "pred_calibrated")
     top10_2025 = named_top10(holdout_full, 2025, "pred_calibrated")
 
