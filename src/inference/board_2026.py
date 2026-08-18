@@ -1395,7 +1395,7 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         lines.append(_markdown_table(headers, rows))
         lines.append("")
 
-    BOARD_MD_PATH.write_text("\n".join(lines))
+    BOARD_MD_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
 def main() -> int:
