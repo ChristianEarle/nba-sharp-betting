@@ -111,3 +111,52 @@ dashboard: dashboard-build
 dashboard-publish: dashboard-build
 	cp outputs/dashboard/index.html docs/index.html
 	@echo "docs/index.html updated -- commit and push to update the live site"
+
+# --------------------------------------------------------------------------
+# ui/ -- the Vite + React + TypeScript BreakoutLab UI (see ui/README.md).
+# Reads the same underlying artifacts as `dashboard`/`dashboard-build` above,
+# via a standalone JSON export (src/dashboard/export_json.py) instead of the
+# single-file HTML+embedded-JSON page those targets produce.
+# --------------------------------------------------------------------------
+
+.PHONY: ui-data ui ui-build ui-publish
+
+# JSON data contract only: writes outputs/board_payload.json from whatever
+# board/model/data artifacts already exist on disk (no data pull, no
+# retraining -- same "score-only" contract as the `board`/`dashboard-build`
+# targets above).
+ui-data:
+	@echo ">> ui-data: assembling outputs/board_payload.json"
+	uv run python -m src.dashboard.export_json
+
+# Full dev loop: refresh the data, install node deps if this is a fresh
+# checkout (node_modules/ is gitignored, like every other package manager's
+# install directory), then start the Vite dev server. vite.config.ts serves
+# outputs/board_payload.json at /data/board_payload.json itself, so no
+# separate copy/symlink step is needed here.
+ui: ui-data
+	@echo ">> ui: npm install (if needed) + vite dev server on :5173"
+	cd ui && [ -d node_modules ] || npm install
+	cd ui && npm run dev
+
+# Production build: refresh the data, then `npm run build` (typecheck +
+# vite build). vite.config.ts's board-payload plugin copies
+# outputs/board_payload.json into ui/dist/data/ as part of the build itself,
+# so ui/dist/ is self-contained afterward.
+ui-build: ui-data
+	@echo ">> ui-build: npm install (if needed) + tsc -b && vite build"
+	cd ui && [ -d node_modules ] || npm install
+	cd ui && npm run build
+
+# Publish the built ui/ app to docs/ (served by GitHub Pages once enabled:
+# repo Settings -> Pages -> Deploy from a branch -> main, /docs), replacing
+# the single-file dashboard-publish page as the Pages site. Flat copy --
+# vite.config.ts's `base: './'` makes every asset reference relative, so the
+# same dist/ tree works whether served from docs/ at the repo root or under
+# GitHub Pages' /nba-sharp-betting/ subpath.
+ui-publish: ui-build
+	@echo ">> ui-publish: copying ui/dist/* into docs/ (replacing the single-file dashboard as the Pages site)"
+	rm -rf docs
+	mkdir -p docs
+	cp -r ui/dist/. docs/
+	@echo "docs/ updated -- commit and push to update the live site"
