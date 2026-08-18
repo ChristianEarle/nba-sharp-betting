@@ -208,6 +208,10 @@ def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
                 "avail": r["availability"] if pd.notna(r["availability"]) else None,
                 "sat": bool(r["probability_saturated"]) if pd.notna(r["probability_saturated"]) else None,
                 "drift": drift,
+                # v2.1 addendum: "broke out last season" transparency badge -- players who
+                # already posted breakout==1 in 2025 read as confusing on THIS year's board
+                # without an explanation (e.g. Daniel Jones). Presentation only.
+                "bo": bool(r["broke_out_last_season"]) if pd.notna(r.get("broke_out_last_season")) else False,
                 # v2.0 quantile projections (Deliverable 4) -- null for a position with
                 # no quantile bundle yet, same "absent -> None" convention as every
                 # column above.

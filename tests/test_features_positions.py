@@ -64,7 +64,16 @@ _POSITIONS = {
             "rush_yards_pg_n1",
             "ppr_ppg_n1",
             "backfield_committee_count_n1",
+            "returning_incumbent_share",
+            "depth_rank_derived",
+            "depth_rank_derived_n1",
+            "depth_moved_up",
+            "became_presumptive_starter",
+            "path_to_volume",
+            "young_stayer",
+            "moved_into_vacancy",
         ],
+        "vacated_col": "vacated_carry_share",
         "canaries": [
             (2017, "Alvin Kamara", False, "rookie season, must be absent"),
             (2019, "Austin Ekeler", True, "strong receiving usage"),
@@ -93,7 +102,16 @@ _POSITIONS = {
             "targets_pg_n1",
             "ppr_ppg_n1",
             "td_rate_n1",
+            "returning_incumbent_share",
+            "depth_rank_derived",
+            "depth_rank_derived_n1",
+            "depth_moved_up",
+            "became_presumptive_starter",
+            "path_to_volume",
+            "young_stayer",
+            "moved_into_vacancy",
         ],
+        "vacated_col": "vacated_target_share",
         "canaries": [
             (2020, "Darren Waller", True, "elite shares"),
             (2021, "Mark Andrews", True, "elite shares"),
@@ -123,7 +141,15 @@ _POSITIONS = {
             "ppr_ppg_n1",
             "rush_attempts_pg_n1",
             "rush_yards_pg_n1",
+            "returning_starter",
+            "depth_rank_derived",
+            "depth_rank_derived_n1",
+            "depth_moved_up",
+            "became_presumptive_starter",
+            "young_stayer",
+            "moved_into_vacancy",
         ],
+        "vacated_col": None,  # QB has no path_to_volume -- see src.features.qb's docstring
         "canaries": [
             (2019, "Lamar Jackson", True, "high N-1 rush yard share"),
             (2023, "Jalen Hurts", True, "high N-1 rush volume"),
@@ -327,3 +353,63 @@ def test_hurts_2020_absent_rookie() -> None:
     df = _df("qb")
     row = df.filter((pl.col("season") == 2020) & (pl.col("player_name") == "Jalen Hurts"))
     assert row.height == 0
+
+
+# --------------------------------------------------------------------------
+# v2.1 derived depth/competition features -- formula-consistency checks,
+# identical mechanism to tests/test_features.py's WR version, generalized
+# over rb/te/qb (QB has no path_to_volume and a different moved_into_vacancy
+# formula -- see src.features.qb's docstring).
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pos", _ALL_POS)
+def test_depth_composites_match_their_formulas(pos: str) -> None:
+    df = _df(pos)
+
+    moved = df.filter(pl.col("depth_rank_derived").is_not_null() & pl.col("depth_rank_derived_n1").is_not_null())
+    if moved.height:
+        expected_moved_up = moved.get_column("depth_rank_derived_n1") - moved.get_column("depth_rank_derived")
+        assert expected_moved_up.equals(moved.get_column("depth_moved_up"))
+        expected_became = (
+            (moved.get_column("depth_rank_derived") == 1) & (moved.get_column("depth_rank_derived_n1") >= 2)
+        ).cast(pl.Int64)
+        assert expected_became.equals(moved.get_column("became_presumptive_starter"))
+
+    ys = df.filter(pl.col("age").is_not_null() & pl.col("team_change").is_not_null())
+    if ys.height:
+        expected_ys = ((ys.get_column("age") <= 24) & (ys.get_column("team_change") == 0)).cast(pl.Int64)
+        assert expected_ys.equals(ys.get_column("young_stayer"))
+
+    vacated_col = _POSITIONS[pos]["vacated_col"]
+    if vacated_col is None:
+        # QB: moved_into_vacancy = team_change==1 AND no returning starter (see qb.py).
+        miv = df.filter(pl.col("team_change").is_not_null() & pl.col("returning_starter").is_not_null())
+        if miv.height:
+            expected_miv = ((miv.get_column("team_change") == 1) & (miv.get_column("returning_starter") == 0)).cast(
+                pl.Int64
+            )
+            assert expected_miv.equals(miv.get_column("moved_into_vacancy"))
+        assert "path_to_volume" not in df.columns
+    else:
+        ptv = df.filter(pl.col(vacated_col).is_not_null() & pl.col("returning_incumbent_share").is_not_null())
+        if ptv.height:
+            expected_ptv = ptv.get_column(vacated_col) - ptv.get_column("returning_incumbent_share")
+            diff = (expected_ptv - ptv.get_column("path_to_volume")).abs()
+            assert (diff < 1e-9).all()
+
+        miv = df.filter(pl.col("team_change").is_not_null() & pl.col(vacated_col).is_not_null())
+        if miv.height:
+            expected_miv = ((miv.get_column("team_change") == 1) & (miv.get_column(vacated_col) > 0.25)).cast(
+                pl.Int64
+            )
+            assert expected_miv.equals(miv.get_column("moved_into_vacancy"))
+
+
+@pytest.mark.parametrize("pos", _ALL_POS)
+def test_depth_rank_derived_no_negative_or_zero_ranks(pos: str) -> None:
+    df = _df(pos)
+    for col in ("depth_rank_derived", "depth_rank_derived_n1"):
+        vals = df.get_column(col).drop_nulls()
+        if vals.len():
+            assert (vals >= 1).all(), f"{pos}: {col} has a non-positive rank"

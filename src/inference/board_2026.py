@@ -531,15 +531,111 @@ def attach_renormalized_probability(board: pd.DataFrame, mean_breakouts: dict[st
     return board
 
 
+# --------------------------------------------------------------------------
+# v2.1 Deliverable 3: driver-chip honesty fix. The v2.0 chips showed a
+# feature name + SHAP direction but never the feature's own VALUE -- "New
+# team +" rendered identically whether the player actually changed teams
+# (team_change=1) or not (team_change=0, positive SHAP for some other
+# reason entirely). Every chip below is resolved to a state-aware label
+# BEFORE it leaves this module -- the compact ``shap_top3`` string, the
+# ``rationale`` sentence, and the dashboard's driver chips (which just
+# render whatever plain-language label this module already produced; see
+# ``src/dashboard/template.py``'s ``driverChips`` and its comment) all read
+# the identical honest text, so there is exactly one place this can drift.
+# --------------------------------------------------------------------------
+
+# Binary/flag features: (label when 0, label when 1). Covers every 0/1
+# feature that can appear as a top SHAP driver, including the v2.1
+# depth/competition composites (src.features.shared).
+BINARY_FEATURE_STATES: dict[str, tuple[str, str]] = {
+    "team_change": ("Stayed put", "New team"),
+    "new_hc": ("Coach continuity", "New coach"),
+    "new_oc": ("OC continuity", "New OC"),
+    "new_oc_interaction": ("OC continuity", "New OC"),
+    "undrafted": ("Drafted", "Undrafted"),
+    "label_season_2020": ("Normal season", "COVID-disrupted season"),
+    "preseason_team_fallback": ("Live Week-1 roster", "Roster-data fallback"),
+    "young_stayer": ("Not a young stayer", "Young + stayed put"),
+    "moved_into_vacancy": ("No clear vacancy move", "Moved into a vacancy"),
+    "became_presumptive_starter": ("Not a new QB1", "Became the presumptive starter"),
+    "returning_starter": ("No proven returning starter", "Proven starter returns"),
+}
+
+# Feature bases where a LOWER raw value is the "good"/"elite" direction --
+# everything else defaults to higher=elite. Age and draft capital read
+# backwards from a plain magnitude comparison; depth_rank_derived (1 = top
+# of the depth chart) and competition_draft_capital/sack_rate/int_rate are
+# the same "lower is better" shape.
+LOWER_IS_BETTER = {
+    "age",
+    "age_sq",
+    "draft_pick",
+    "log_draft_pick",
+    "depth_rank_derived",
+    "depth_rank_derived_n1",
+    "competition_draft_capital",
+    "sack_rate",
+    "int_rate",
+}
+
+
+def honest_state_label(feature: str, raw_value, median) -> str:
+    """The value-aware chip/rationale text for `feature` at `raw_value` -- a binary flag's
+
+    named state ("Stayed put" / "New team"), or a continuous feature's high/low descriptor
+    relative to `median` ("Elite target share" / "Thin target share"; "Rising"/"Falling" for
+    a ``_yoy_delta`` trend column, since "Elite ... trend" reads oddly). Falls back to the
+    plain humanized feature name when the value or median is missing -- never invents a
+    state the data doesn't support.
+    """
+    base = re.sub(r"_(n1|yoy_delta)$", "", feature)
+    label = _humanize_feature(feature)
+    missing = raw_value is None or (isinstance(raw_value, (int, float, np.floating, np.integer)) and pd.isna(raw_value))
+
+    if base in BINARY_FEATURE_STATES:
+        if missing:
+            return label
+        lo, hi = BINARY_FEATURE_STATES[base]
+        return hi if float(raw_value) >= 0.5 else lo
+
+    if missing or median is None or pd.isna(median):
+        return label
+
+    # _FEATURE_LABELS' phrases were written to read naturally after "boosted
+    # by"/"held back by" (e.g. "a deep preseason ranking"); strip a leading
+    # article before prefixing Elite/Thin/Rising/Falling so the chip doesn't
+    # read "Elite a deep preseason ranking".
+    bare = re.sub(r"^(a|an|the)\s+", "", label, flags=re.IGNORECASE)
+    higher_is_elite = base not in LOWER_IS_BETTER
+    is_elite = (raw_value >= median) if higher_is_elite else (raw_value <= median)
+    if feature.endswith("_yoy_delta"):
+        return f"{'Rising' if raw_value >= median else 'Falling'} {bare}"
+    return f"{'Elite' if is_elite else 'Thin'} {bare}"
+
+
 def attach_shap_drivers(bundle: dict, df: pd.DataFrame) -> pd.DataFrame:
+    """Attach shap_top3 (honest, value-aware chip text) + _shap_top_features (feature, signed
+
+    SHAP value, honest state label -- consumed by build_rationale below). Medians are
+    computed from `df` itself: this position's own currently-scored 2026 population, i.e.
+    "the position median for that season" the brief calls for.
+    """
     tree_cols = bundle["tree_feature_cols"]
+    medians = {c: df[c].median() for c in tree_cols}
     sv = shp.blend_weighted_shap(bundle, df[tree_cols])
     compact, top_features = [], []
     for i in range(len(df)):
         order = np.argsort(-np.abs(sv[i]))[:TOP_DRIVERS_ON_BOARD]
-        parts = [f"{tree_cols[j]}:{'+' if sv[i][j] >= 0 else '-'}" for j in order]
+        parts, feats_row = [], []
+        for j in order:
+            feat = tree_cols[j]
+            raw_val = df[feat].iloc[i]
+            state_label = honest_state_label(feat, raw_val, medians.get(feat))
+            sign = "+" if sv[i][j] >= 0 else "-"
+            parts.append(f"{state_label}:{sign}")
+            feats_row.append((feat, float(sv[i][j]), state_label))
         compact.append(", ".join(parts))
-        top_features.append([(tree_cols[j], float(sv[i][j])) for j in order])
+        top_features.append(feats_row)
     out = df.copy()
     out["shap_top3"] = compact
     out["_shap_top_features"] = top_features
@@ -617,18 +713,21 @@ def _humanize_feature(name: str) -> str:
     return label
 
 
-def build_rationale(pos: str, row: pd.Series, top_features: list[tuple[str, float]]) -> str:
-    """Template sentence from the top-3 SHAP drivers, e.g. "Year-2 WR: boosted by
+def build_rationale(pos: str, row: pd.Series, top_features: list[tuple[str, float, str]]) -> str:
+    """Template sentence from the top-3 SHAP drivers, e.g. "Year-2 WR: boosted by elite
 
-    efficiency residual on volume; boosted by vacated targets ahead; held back by age."
-    A plain-language echo of ``shap_top3``, not a new signal.
+    target share; boosted by vacated targets ahead; held back by thin age." -- a
+    plain-language echo of ``shap_top3``'s honest, value-aware state labels (v2.1
+    Deliverable 3), not a new signal and not the pre-v2.1 value-blind feature name alone.
+    ``top_features`` entries are (feature, signed shap value, honest state label) -- see
+    ``attach_shap_drivers``.
     """
     year = row.get("year_in_league")
     year_str = f"Year-{int(year) + 1}" if pd.notna(year) else "Veteran"
     phrases = []
-    for feature, value in top_features:
+    for feature, value, state_label in top_features:
         verb = "boosted by" if value >= 0 else "held back by"
-        phrases.append(f"{verb} {_humanize_feature(feature)}")
+        phrases.append(f"{verb} {state_label.lower()}")
     return f"{year_str} {pos.upper()}: " + "; ".join(phrases) + "."
 
 
@@ -850,6 +949,36 @@ def _markdown_table(headers: list[str], rows: list[list]) -> str:
     return "\n".join(lines)
 
 
+# Most recent completed season -- the "broke out last season" transparency
+# badge (v2.1 addendum) reads this year's breakout==1 population off
+# labels.parquet so a player like Daniel Jones (2025 breakout, still
+# 2026-eligible) shows up on the current board with a visible explanation
+# instead of silently looking like a "new" breakout pick.
+LAST_SEASON_BREAKOUT_YEAR = 2025
+
+
+def attach_broke_out_last_season(df: pd.DataFrame, gsis_col: str = "gsis_id") -> pd.DataFrame:
+    """broke_out_last_season: True if `gsis_col` had breakout==1 in labels.parquet's
+
+    season==``LAST_SEASON_BREAKOUT_YEAR`` row. Presentation-only (no model input) -- see
+    the module-level comment above ``LAST_SEASON_BREAKOUT_YEAR``. Works unchanged for the
+    rookie board too: a 2026 rookie's gsis_id structurally cannot match a 2025 non-rookie
+    breakout row, so it always comes out False there, no special-casing needed.
+    """
+    out = df.copy()
+    if gsis_col not in out.columns or out.empty:
+        out["broke_out_last_season"] = False
+        return out
+    labels = pl.read_parquet(train.LABELS_PATH)
+    broke_out_ids = set(
+        labels.filter((pl.col("season") == LAST_SEASON_BREAKOUT_YEAR) & (pl.col("breakout") == 1))
+        .get_column("gsis_id")
+        .to_list()
+    )
+    out["broke_out_last_season"] = out[gsis_col].isin(broke_out_ids)
+    return out
+
+
 def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -864,8 +993,9 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         "p_startable", "p_elite", "p_useful", "value_gap", "breakout_eligible",
         "primary_engine", "projection_sentence", "already_priced_as_starter",
         "seg_elite", "seg_starter", "seg_useful", "seg_bust",
+        "broke_out_last_season",
     ]
-    v = veteran_board.copy()
+    v = attach_broke_out_last_season(veteran_board.copy())
     if not v.empty:
         # raw_score (pre-calibration blend score) is the tiebreaker for ties -- the
         # per-position renormalization scale is a single positive constant, so it
@@ -876,8 +1006,11 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
             v[c] = np.nan
     v_out = v[veteran_cols].rename(columns={"consensus_pos_rank": "consensus_ecr_pos_rank"})
 
-    rookie_cols = ["player_name", "pos", "team", "draft_round", "draft_pick", "probability_heuristic", "availability", "note"]
-    r = rookie_board.copy()
+    rookie_cols = [
+        "player_name", "pos", "team", "draft_round", "draft_pick", "probability_heuristic",
+        "availability", "note", "broke_out_last_season",
+    ]
+    r = attach_broke_out_last_season(rookie_board.copy())
     if not r.empty:
         r = r.sort_values(["pos", "probability_heuristic"], ascending=[True, False])
     for c in rookie_cols:

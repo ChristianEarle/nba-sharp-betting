@@ -26,7 +26,14 @@ each call.
 > below for the full quantile/gate/lens writeup, and
 > [Known Limitations](#known-limitations) for what to take with a grain of
 > salt. (v1.6 was an internal-only checkpoint folded into v1.7 — no
-> separate v1.6 section exists.)
+> separate v1.6 section exists.) **v2.1** (capacity/signal work, on top of
+> v2.0) adds five nflverse-depth-chart-free derived features per position
+> (`src/features/shared.py`), a pooled-across-positions classifier
+> experiment with a pre-stated promotion gate (`src/models/pooled_experiment.py`),
+> a driver-chip honesty fix so a chip reflects the feature's actual VALUE
+> and not just its name + SHAP direction (`src/inference/board_2026.py`),
+> and a "broke out last year" transparency badge. See "v2.1: capacity/signal
+> work" below for the full writeup and verdicts.
 
 ## Setup
 
@@ -950,6 +957,224 @@ ineligible players, tiny-config determinism (`output_root` passed
 throughout, same guard as every other pipeline test in this repo), and a
 comparison-gate schema check. Full suite: 307 pre-existing tests plus the
 new quantile suite, all green — see the final report / CI for the exact count.
+
+## v2.1: capacity/signal work — derived depth features, pooled model experiment, chip honesty
+
+Motivation: every per-position classifier fits 27-48 positives against
+~50 candidate features — at or over capacity for stable tree splits.
+This round asks whether better-targeted features and/or pooling the four
+positions' training pools into one classifier helps, and separately fixes
+a real presentation bug (driver chips that named a feature and a SHAP
+direction but never showed the feature's own value).
+
+### Deliverable 1 — derived depth/competition features (`src/features/shared.py`)
+
+nflverse's own `depth_charts` table stops at 2024 and ships an
+incompatible payload for 2026 (see "Known data issues" below) — unusable
+for a pipeline that must score the current offseason. Every feature below
+is derived instead from data that exists for every season including 2026:
+N-1 (or N-2, for the "_n1" depth-rank pair) usage plus the season-N
+Week-1 roster (`season_roster_team`/`season_roster_position`, the same
+sourcing `vacated_shares` already uses).
+
+- **`returning_incumbent_share`** (WR/RB/TE) — sum of N-1 team-relative
+  usage share (targets/team_targets for WR/TE, carries/team_carries for
+  RB) of same-position players who played for the season-N team in N-1
+  AND are still on its season-N roster. Structurally the mirror image of
+  `vacated_shares` (same building blocks, the "stayed" half of the N-1
+  population instead of the "departed" half) — self-inclusive the same
+  way `target_share`'s own team-total denominator already is.
+- **`returning_starter`** (QB) — 1 if a QB *other than the player himself*
+  who threw >50% of the team's N-1 pass attempts is still on the
+  season-N roster; 0 if not; null if the team has no N-1 QB-attempt data
+  at all. QB's own analogue of `returning_incumbent_share` (a flag, not a
+  share — a starting job isn't divisible the way a target share is).
+- **`depth_rank_derived`** — rank within the player's season-N team +
+  position group, ordered descending by each member's own N-1 usage
+  share (target/carry share for WR/RB/TE, pass-attempts/game for QB)
+  wherever they actually played, nulls last. 1 = presumptive top of the
+  depth chart.
+- **`depth_rank_derived_n1` / `depth_moved_up` / `became_presumptive_starter`**
+  (user-requested addendum, same session) — `depth_rank_derived_n1` is
+  literally the *same* `depth_rank_table` output read one season earlier
+  and shifted forward (N-2 usage + season-N-1 roster), so
+  `depth_moved_up = depth_rank_derived_n1 - depth_rank_derived` (positive
+  = climbed the pecking order) and
+  `became_presumptive_starter = (depth_rank_derived==1) AND (depth_rank_derived_n1>=2)`
+  (the classic "backup inherits the job" breakout setup) fall out with no
+  new leakage surface.
+- **`path_to_volume`** (WR/RB/TE only — see below) `= vacated_(target|carry)_share − returning_incumbent_share`,
+  signed; positive = opportunity exceeds returning competition. **Not
+  added to `features_qb.parquet`**: the brief's formula is share-based
+  (target/carry), which has no QB analogue — QB's own competition signal
+  is `returning_starter` instead, a deliberate, documented divergence, not
+  an oversight.
+- **`young_stayer`** `= (age<=24) AND (team_change==0)` — every position.
+- **`moved_into_vacancy`** `= (team_change==1) AND (vacated share > 0.25)`
+  (WR/RB/TE); QB's analogue is `(team_change==1) AND (returning_starter==0)`
+  (moved into a job with no proven returning starter — `vacated_target_share`
+  has no QB meaning).
+
+All five composites are explicit, not left for the trees to discover —
+per the brief, an interaction term isn't reliably learnable from 27-48
+positives, so `young_stayer`/`moved_into_vacancy`/`became_presumptive_starter`
+are handed to the model pre-computed. Nullable throughout (see the final
+report's null-rate table); `tests/test_features.py`/`test_features_positions.py`
+extend the existing structural leakage test (season-2023 rows rebuilt
+with that season's `player_stats` rows deleted must be byte-identical) to
+every new column, plus formula-consistency tests re-deriving each
+composite from its documented inputs and a depth-rank tie/negative-rank
+guard.
+
+**Known quirk (not a bug):** `depth_rank_derived` ranks by *season-total*
+team-relative share, not games-missed-adjusted — an injury-shortened N-1
+season can rank a clearly-better player below a healthy backup/rookie
+with a slightly higher full-season share (verified case: Justin
+Jefferson's 2024 row ranks him #2 on Minnesota behind Jordan Addison,
+because Jefferson's 2023 target share, 0.165, computed over only 10
+games missed by injury, edges just below Addison's full-17-game 0.178 —
+see the final report's named sanity rows). This is the same volume-not-rate
+convention every share-based feature in this codebase already uses, kept
+here for consistency rather than special-cased.
+
+### Deliverable 2 — pooled-position model experiment (`src/models/pooled_experiment.py`)
+
+*(See the final report for the actual verdicts and full tables — this is
+the writeup of the method; `outputs/pooled_experiment.md` is the
+regenerable artifact, `make pooled-experiment` reruns it.)*
+
+One classifier over all four positions' `in_training_pool==1` rows
+(166 positives, 3,999 rows — the brief's own stated baseline, using every
+position's FULL 2014-2025 history rather than honoring RB's own
+`train_season_start: 2020` proxy-era restriction; see the module
+docstring for why), position captured as four `position_{POS}` one-hot
+columns, tree features = the union of every position's own
+`tree_feature_columns` (a feature that doesn't exist for a given
+position, e.g. QB's `target_share_n1`, is simply null on that position's
+rows — LightGBM/XGBoost already tolerate nullable columns natively).
+Two arms, both on the identical CV folds and v1.7 seed-ensemble config
+(`configs/model_wr.yaml`'s `optuna` block: 60 classifier trials per
+model type, seeds `[42, 1337, 2024]`) the four per-position classifiers
+already use, reusing `src.models.train`'s tuning/blend/Platt-calibration
+machinery verbatim (every function there was already position-agnostic):
+
+1. **`pooled`** — the full union feature set.
+2. **`pruned_pooled`** — an independent retrain (its own Optuna search,
+   not a column slice of arm 1) restricted to the top-15 features by
+   mean(|SHAP|) on the pooled VALIDATION rows only, computed off
+   per-fold LGBM refits at the base seed's frozen params
+   (`pooled_validation_shap_importance`) — holdout rows never enter
+   feature selection.
+
+Only the classifier head is in scope (per the brief) — no regression, no
+quantile re-fit.
+
+**GATE (pre-stated, binding):** per position, pick whichever arm has the
+better validation-fold PR-AUC restricted to that position's own OOF
+validation rows (chosen from validation alone, before holdout is
+touched). That arm's position REPLACES the incumbent ranking engine (the
+v1.7 classifier at WR/RB/QB, the v2.0 quantile head at TE —
+`outputs/comparison_gate.json`) iff its holdout top-10 precision — on
+the identical population/metric the incumbent's own recorded number
+already uses (all `in_training_pool` holdout rows for a classifier
+incumbent; `breakout_eligible` holdout rows ranked by raw `p_startable`
+for the TE quantile incumbent) — is STRICTLY GREATER than the
+incumbent's. Ties keep the incumbent (simpler system wins ties; pooled
+must win outright to displace it).
+
+**Verdict (real run, `outputs/pooled_experiment.md`/`.json`): no position promotes.**
+
+| Position | Chosen arm (validation PR-AUC) | Incumbent (top-10) | Pooled (comparison value) | Promote? |
+| --- | --- | --- | --- | --- |
+| WR | pruned_pooled (0.196 vs pooled's 0.180) | classifier (0.200) | 0.100 | no |
+| RB | pooled (0.061 vs pruned's 0.060) | classifier (0.200) | 0.200 (**tie**) | no |
+| TE | pooled (0.265 vs pruned's 0.249) | quantile (0.200) | 0.100 | no |
+| QB | pooled (0.450 vs pruned's 0.404) | classifier (0.300) | 0.200 | no |
+
+RB is the closest call: the pooled arm's holdout top-10 precision (0.200,
+2/10 on a 4-positive-holdout slice) exactly TIES the incumbent's — the
+gate's own tie-breaking rule ("pooled must win outright") correctly keeps
+the incumbent, not a coin flip. Every other position's pooled/pruned
+holdout top-10 comes in strictly below its incumbent. Read alongside the
+5x-larger training pool, this reads as evidence *against* pooling helping
+this particular capacity problem — at 166 pooled positives the model still
+picks up mostly `expectation_pos_rank` (market rank) and `depth_rank_derived`,
+not a materially richer signal than each position's own smaller, more
+homogeneous pool already offers; see the final report for the full
+before/after discussion. One encouraging side-result: the pruned arm's
+own top-15-by-SHAP list includes three of Deliverable 1's new columns
+(`depth_rank_derived`, `path_to_volume`, `returning_incumbent_share`) —
+real pooled-validation signal, even though the pooled classifier overall
+didn't clear the promotion bar.
+
+**No production bundle changed as a result of this experiment** — every
+position keeps its existing incumbent engine.
+
+### Deliverable 3 — driver-chip honesty fix (`src/inference/board_2026.py`, `src/dashboard/template.py`)
+
+The v2.0 chips showed a feature name + SHAP direction but never the
+feature's own VALUE — "New team ▲" rendered identically whether the
+player actually changed teams (`team_change=1`) or not
+(`team_change=0`, positive SHAP for some other reason entirely). Fixed
+at the single source every consumer reads from
+(`board_2026.honest_state_label`), not independently in three places:
+
+- **Binary/flag features** (`team_change`, `new_hc`, `new_oc`,
+  `undrafted`, `label_season_2020`, `preseason_team_fallback`, and the
+  new v2.1 composites `young_stayer`/`moved_into_vacancy`/
+  `became_presumptive_starter`/`returning_starter`) render their actual
+  named state — `team_change=0` + positive SHAP → "Stayed put ▲";
+  `team_change=1` + positive SHAP → "New team ▲"; same pattern for
+  `new_hc` → "Coach continuity ▲" / "New coach ▲".
+- **Continuous features** render high/low relative to that position's
+  CURRENT-BOARD median (the scored 2026 population, i.e. the brief's
+  "position median for that season") — "Elite target share ▲" (value
+  above median) vs "Thin target share ▼" (below median); a
+  `_yoy_delta` trend column reads "Rising"/"Falling" instead of
+  "Elite"/"Thin" (grammatically distinct from a level). A small
+  `LOWER_IS_BETTER` set (age, draft capital, `depth_rank_derived`,
+  `sack_rate`, `int_rate`, `competition_draft_capital`) flips which
+  direction counts as "Elite" so a below-median age reads "Elite age",
+  not "Thin age".
+- Missing value or missing median → falls back to the plain feature
+  label, never invents a state the data doesn't support.
+
+This single function feeds **all three** places the brief calls out:
+the board CSV's `shap_top3` string (regenerated), the `rationale`
+sentence generator (`build_rationale`, now built from the same honest
+state labels), and the dashboard (`driverChips` in
+`src/dashboard/template.py` now renders the pre-resolved label text
+directly instead of re-deriving one client-side from a bare feature
+code — the exact mechanism that let a value-blind chip through before).
+`tests/test_inference.py` adds a grammar regression guard, a
+self-contradiction guard (a chip can never claim both "Stayed put" and
+"New team" for the same player), and direct unit tests of
+`honest_state_label`'s binary/continuous/missing-input branches.
+
+**Addendum: "broke out last season" transparency badge.** Players with
+`breakout==1` in `labels.parquet`'s season-2025 row get
+`broke_out_last_season=True` on the board (`attach_broke_out_last_season`)
+and a small "broke out last yr" badge next to their name in both
+dashboard lenses (one shared row renderer — the badge is presentation
+only, no model input). Verified against `labels.parquet` directly rather
+than the illustrative example in the request (Daniel Jones's 2025 row is
+`breakout=0`, `finish_pos_rank=13` — a real non-breakout — so he is
+correctly NOT flagged; the badge follows the label definition, not the
+name).
+
+### Deliverable 4 — regenerate + report
+
+`features_{wr,rb,te,qb}.parquet` rebuilt with the five new columns.
+Every existing bundle's `tree_feature_cols`/`logistic_feature_cols` is an
+explicit frozen list captured at training time (`src.models.train`'s
+`frozen` dict) — adding columns is additive, so `src.inference.board_2026`
+resolves every bundle's scoring unchanged; verified by rebuilding
+`outputs/breakout_board_2026.{csv,md}` and `outputs/dashboard/index.html`
+against the expanded matrices with zero errors and no feature-list
+mismatch. See the final report for whether Deliverable 2's gate promoted
+any position (which would require a real retrain at frozen
+hyperparameters) and, if not, confirmation that no production retrain
+was needed beyond the regenerated features feeding the existing bundles.
 
 ## Known Limitations
 

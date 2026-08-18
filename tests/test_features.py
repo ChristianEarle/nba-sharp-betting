@@ -314,9 +314,79 @@ _CORE_COLUMNS = [
     "ppr_ppg_n1",
     "yards_per_reception_n1",
     "td_rate_n1",
+    # v2.1 derived depth/competition features (src.features.shared) --
+    # nflverse depth_charts stops at 2024, so these are derived instead
+    # from N-1 usage + Week-1 season-N roster (nullable, see shared.py).
+    "returning_incumbent_share",
+    "depth_rank_derived",
+    "depth_rank_derived_n1",
+    "depth_moved_up",
+    "became_presumptive_starter",
+    "path_to_volume",
+    "young_stayer",
+    "moved_into_vacancy",
 ]
 
 _NGS_ONLY_COLUMNS = ["avg_separation_n1", "avg_cushion_n1", "catch_percentage_n1"]
+
+
+# --------------------------------------------------------------------------
+# v2.1 derived depth/competition features -- formula-consistency checks.
+# These re-derive each composite from the columns it's documented to be
+# built from and assert equality against the stored value for every row
+# where the inputs are non-null, independent of how the builder computes
+# it internally.
+# --------------------------------------------------------------------------
+
+
+def test_depth_composites_match_their_formulas() -> None:
+    df = _df()
+
+    moved = df.filter(pl.col("depth_rank_derived").is_not_null() & pl.col("depth_rank_derived_n1").is_not_null())
+    if moved.height:
+        expected_moved_up = moved.get_column("depth_rank_derived_n1") - moved.get_column("depth_rank_derived")
+        assert expected_moved_up.equals(moved.get_column("depth_moved_up"))
+        expected_became = (
+            (moved.get_column("depth_rank_derived") == 1) & (moved.get_column("depth_rank_derived_n1") >= 2)
+        ).cast(pl.Int64)
+        assert expected_became.equals(moved.get_column("became_presumptive_starter"))
+
+    ptv = df.filter(pl.col("vacated_target_share").is_not_null() & pl.col("returning_incumbent_share").is_not_null())
+    if ptv.height:
+        expected_ptv = ptv.get_column("vacated_target_share") - ptv.get_column("returning_incumbent_share")
+        diff = (expected_ptv - ptv.get_column("path_to_volume")).abs()
+        assert (diff < 1e-9).all()
+
+    ys = df.filter(pl.col("age").is_not_null() & pl.col("team_change").is_not_null())
+    if ys.height:
+        expected_ys = ((ys.get_column("age") <= 24) & (ys.get_column("team_change") == 0)).cast(pl.Int64)
+        assert expected_ys.equals(ys.get_column("young_stayer"))
+
+    miv = df.filter(pl.col("team_change").is_not_null() & pl.col("vacated_target_share").is_not_null())
+    if miv.height:
+        expected_miv = ((miv.get_column("team_change") == 1) & (miv.get_column("vacated_target_share") > 0.25)).cast(
+            pl.Int64
+        )
+        assert expected_miv.equals(miv.get_column("moved_into_vacancy"))
+
+
+def test_depth_rank_derived_jefferson_2022_is_one() -> None:
+    """Justin Jefferson was Minnesota's clear #1 WR by 2021 target share -- rank 1 both years."""
+    df = _df()
+    row = df.filter((pl.col("season") == 2022) & (pl.col("player_name") == "Justin Jefferson"))
+    if row.height == 0:
+        pytest.skip("Justin Jefferson 2022 not in features_wr output")
+    r = row.row(0, named=True)
+    assert r["depth_rank_derived"] == 1
+    assert r["depth_rank_derived_n1"] == 1
+
+
+def test_depth_rank_derived_no_negative_or_zero_ranks() -> None:
+    df = _df()
+    for col in ("depth_rank_derived", "depth_rank_derived_n1"):
+        vals = df.get_column(col).drop_nulls()
+        if vals.len():
+            assert (vals >= 1).all(), f"{col} has a non-positive rank"
 
 
 def test_pre_2016_rows_have_null_ngs_but_nonnull_core_columns() -> None:

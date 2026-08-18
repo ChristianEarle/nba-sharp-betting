@@ -133,6 +133,15 @@ _OUT_COLUMNS = (
     + ["implied_ppg", "implied_win_prob", "has_vegas"]
     + [f"{m}_n1" for m in BASE_METRICS]
     + [f"{m}_yoy_delta" for m in BASE_METRICS]
+    + [
+        "returning_starter",
+        "depth_rank_derived",
+        "depth_rank_derived_n1",
+        "depth_moved_up",
+        "became_presumptive_starter",
+        "young_stayer",
+        "moved_into_vacancy",
+    ]
 )
 
 
@@ -319,6 +328,32 @@ def build_features_qb(
     )
     out = out.join(supporting_cast, on=["season", "team"], how="left")
     out = sh.attach_vegas_team(out, vegas_team)
+
+    # v2.1 derived depth/competition features -- see src.features.shared's
+    # module-level comment block above season_roster_position. QB has no
+    # returning_incumbent_share/path_to_volume: those are share-based
+    # (target/carry), which has no QB analogue -- the brief gives QB its own
+    # "returning starter" flag instead (see returning_qb_starter_flag),
+    # which fills that slot here; path_to_volume (vacated share minus
+    # returning share) is simply not defined for a starting-job opportunity
+    # and is deliberately not added to this table (documented deviation,
+    # not an oversight -- see the v2.1 final report).
+    out = out.join(sh.returning_qb_starter_flag(reg, season_team), on=["season", "gsis_id"], how="left")
+    season_pos = sh.season_roster_position(rosters, rosters_weekly)
+    roster_team_pos = season_team.join(season_pos, on=["season", "gsis_id"], how="inner")
+    depth_all = sh.depth_rank_table(roster_team_pos, raw, position=POSITION, share_col="pass_attempts_pg")
+    out = sh.attach_depth_movement(out, depth_all)
+    out = sh.attach_young_stayer(out)
+    # QB analogue of moved_into_vacancy: moved teams into a job with no
+    # proven returning starter already occupying it (rather than "vacated
+    # share > 0.25", which has no QB meaning -- see returning_starter above).
+    out = out.with_columns(
+        pl.when(pl.col("team_change").is_null() | pl.col("returning_starter").is_null())
+        .then(None)
+        .otherwise((pl.col("team_change") == 1) & (pl.col("returning_starter") == 0))
+        .cast(pl.Int64)
+        .alias("moved_into_vacancy")
+    )
 
     out = out.with_columns(pl.min_horizontal(pl.col("years_exp"), pl.lit(10)).alias("year_in_league"))
     out = sh.add_covid_flag(out)

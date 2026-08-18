@@ -145,6 +145,12 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
   .gap-cell.pos { color: var(--pos); } .gap-cell.neg { color: var(--neg); }
   .badge-priced { font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: 12px; letter-spacing: .04em; text-transform: uppercase;
     color: var(--faint); border: 1.5px solid var(--line-strong); border-radius: 3px; padding: 2px 8px 3px; white-space: nowrap; }
+  /* v2.1 addendum: "broke out last year" transparency badge -- next to the
+     player name in the row header, present in both lenses (shared row
+     renderer). Distinct accent color from badge-priced so the two never
+     read as the same kind of flag. */
+  .badge-broke { font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: 11px; letter-spacing: .03em; text-transform: uppercase;
+    color: var(--accent-ink); background: var(--chip-bg); border: 1.5px solid var(--accent); border-radius: 3px; padding: 1px 6px 2px; white-space: nowrap; margin-left: 6px; }
   .coverage-stat { font-size: 13.5px; color: var(--muted); margin: 4px 0 14px; }
   .coverage-stat b { color: var(--ink); }
 
@@ -262,7 +268,6 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
 <script>
 (function () {
   "use strict";
-  const FEAT_FALLBACK = f => f.replace(/_/g, " ");
   const DATA = JSON.parse(document.getElementById("data").textContent);
   const BOARD = DATA.board, FEATURES = DATA.features, ECR = DATA.ecr, POS_VIEW = DATA.positions, TRUST = DATA.trust, META = DATA.meta, LCFG = DATA.labels_config;
 
@@ -390,23 +395,24 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
   document.getElementById("lens-hunt").addEventListener("click", () => { lens = "hunt"; openKey = null; renderBoard(); });
   document.getElementById("lens-full").addEventListener("click", () => { lens = "full"; openKey = null; renderBoard(); });
 
+  // v2.1 Deliverable 3 (driver-chip honesty fix): r.s (shap_top3) tokens are
+  // "<honest state label>:<+/->" -- e.g. "Stayed put:+", "Elite target
+  // share:+", "Thin age:-" -- already resolved server-side
+  // (src.inference.board_2026.honest_state_label) to reflect the feature's
+  // actual VALUE, not just its name and SHAP sign. So this just splits and
+  // renders the label as-is; it does NOT re-derive a label from a feature
+  // code, which is what let a value-blind chip like "New team +" render for
+  // a player whose boost actually came from team_change=0 pre-v2.1.
   function driverChips(s, n) {
     return (s || "").split(", ").filter(Boolean).slice(0, n).map(tok => {
       const i = tok.lastIndexOf(":");
-      const f = i > 0 ? tok.slice(0, i).trim() : tok.trim();
+      const label = i > 0 ? tok.slice(0, i).trim() : tok.trim();
       const dir = i > 0 ? tok.slice(i + 1).trim() : "";
       const up = dir.startsWith("+");
       const arrow = dir ? '<span class="dir ' + (up ? "up" : "dn") + '" aria-hidden="true">' + (up ? "▲" : "▼") + "</span>" : "";
-      const label = FEAT_LABEL[f] || FEAT_FALLBACK(f);
       return '<span class="drv">' + arrow + esc(label) + "</span>";
     }).join("");
   }
-  // FEAT_LABEL is filled in from the first feature-profile lookup seen per
-  // code (the payload's `features` map already carries plain labels; this
-  // just gives driverChips() a code->label index without duplicating the
-  // FEAT translation table client-side).
-  const FEAT_LABEL = {};
-  Object.values(FEATURES).forEach(list => (list || []).forEach(f => { FEAT_LABEL[f.feat] = f.label; }));
 
   function costCell(r) {
     if (r.rk) return '<span class="r">' + (r.dr ? "Round " + r.dr + " pick" : "—") + '</span><span class="rr">NFL draft</span>';
@@ -576,7 +582,7 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       return '<li' + (openKey === key ? ' class="open"' : "") + '>' +
         '<button class="row" data-k="' + esc(key) + '" aria-expanded="' + (openKey === key) + '">' +
           '<span class="rank">' + (i + 1) + "</span>" +
-          '<span class="who"><span class="nm">' + esc(r.n) + '</span><span class="sub">' + sub + "</span></span>" +
+          '<span class="who"><span class="nm">' + esc(r.n) + (r.bo ? ' <span class="badge-broke" title="Posted a breakout season in 2025 -- this year’s pick is not a first-time call.">broke out last yr</span>' : '') + '</span><span class="sub">' + sub + "</span></span>" +
           col3 +
           midCell +
           driftCell(r) +

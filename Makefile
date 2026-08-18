@@ -1,4 +1,4 @@
-.PHONY: refresh retrain test board dashboard dashboard-build quantile gate
+.PHONY: refresh retrain test board dashboard dashboard-build quantile gate pooled-experiment
 
 # All targets assume `uv sync --extra dev` has already been run once; see README Setup.
 
@@ -65,6 +65,17 @@ quantile:
 gate:
 	@echo ">> gate: rank thresholds + Deliverable-3 comparison gate"
 	uv run python -m src.inference.projections
+
+# v2.1 Deliverable 2: pooled-position classifier experiment (real Optuna
+# config -- 60 classifier trials x2 model types x4 folds x3 seeds, TWO arms
+# -- takes a while, comparable to one position's own retrain). Writes
+# outputs/pooled_experiment.{md,json} and prints the per-position gate
+# verdict. Does not touch any production bundle by itself -- promoting a
+# position per its verdict is a separate, manual retrain step (see README's
+# v2.1 section).
+pooled-experiment:
+	@echo ">> pooled-experiment: v2.1 Deliverable 2 pooled + pruned-pooled classifier, comparison gate"
+	uv run python -m src.models.pooled_experiment
 
 # Full pytest suite.
 test:

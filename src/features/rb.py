@@ -144,6 +144,16 @@ _OUT_COLUMNS = (
     + ["implied_ppg", "implied_win_prob", "has_vegas"]
     + [f"{m}_n1" for m in BASE_METRICS]
     + [f"{m}_yoy_delta" for m in BASE_METRICS]
+    + [
+        "returning_incumbent_share",
+        "depth_rank_derived",
+        "depth_rank_derived_n1",
+        "depth_moved_up",
+        "became_presumptive_starter",
+        "path_to_volume",
+        "young_stayer",
+        "moved_into_vacancy",
+    ]
 )
 
 
@@ -374,6 +384,23 @@ def build_features_rb(
     out = out.join(sh.vacated_shares(reg, season_team), on=["season", "team"], how="left")
     out = out.join(sh.competition_draft_capital(draft_picks, POSITION), on=["season", "team"], how="left")
     out = sh.attach_vegas_team(out, vegas_team)
+
+    # v2.1 derived depth/competition features -- see src.features.shared's
+    # module-level comment block above season_roster_position.
+    out = out.join(
+        sh.returning_incumbent_share_table(
+            reg, season_team, position=POSITION, usage_col="carries", team_total_col="team_carries"
+        ),
+        on=["season", "team"],
+        how="left",
+    )
+    season_pos = sh.season_roster_position(rosters, rosters_weekly)
+    roster_team_pos = season_team.join(season_pos, on=["season", "gsis_id"], how="inner")
+    depth_all = sh.depth_rank_table(roster_team_pos, raw, position=POSITION, share_col="carry_share")
+    out = sh.attach_depth_movement(out, depth_all)
+    out = sh.attach_path_to_volume(out, "vacated_carry_share")
+    out = sh.attach_young_stayer(out)
+    out = sh.attach_moved_into_vacancy(out, "vacated_carry_share")
 
     out = out.with_columns(pl.min_horizontal(pl.col("years_exp"), pl.lit(10)).alias("year_in_league"))
     out = sh.add_covid_flag(out)
