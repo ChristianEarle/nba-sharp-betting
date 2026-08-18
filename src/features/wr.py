@@ -131,6 +131,15 @@ BASE_METRICS = [
     "catch_percentage",
     "rz_target_share",
     "ez_target_share",
+    # v2.2: efficiency proxies (YPRR substitutes -- true yards-per-route-run is
+    # impossible, route data is dead after 2023). Nullable: yards_per_snap/
+    # targets_per_snap wherever the snap-counts crosswalk doesn't resolve;
+    # catchable_target_rate pre-2022 (FTN's charting-coverage start) or wherever
+    # FTN has no coverage. Gated (src.models.efficiency_gate) before shipping in
+    # any position's model -- see that module's docstring for the promotion rule.
+    "yards_per_snap",
+    "targets_per_snap",
+    "catchable_target_rate",
 ]
 
 # yardline_100 thresholds for the two pbp-derived target-share features --
@@ -212,6 +221,19 @@ def _rate_stats(reg: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _season_touch_sums(reg: pl.DataFrame) -> pl.DataFrame:
+    """season, gsis_id -> season-TOTAL (not per-game) targets, rec_yards -- the numerators
+
+    v2.2's snap-rate proxies (yards_per_snap, targets_per_snap) need, which `_rate_stats`
+    computes internally but only exposes as *_pg rates.
+    """
+    agg = reg.group_by(["season", "player_id"]).agg(
+        pl.col("targets").sum().alias("targets"),
+        pl.col("receiving_yards").sum().alias("rec_yards"),
+    )
+    return agg.rename({"player_id": "gsis_id"})
+
+
 def _shares(reg: pl.DataFrame, team_assign: pl.DataFrame) -> pl.DataFrame:
     """season, gsis_id -> target_share, air_yards_share, wopr, scoped to the N-1 primary team."""
     usage = sh.player_team_usage(reg)
@@ -291,6 +313,7 @@ def build_raw_stat_table(
     rosters: pl.DataFrame | None,
     ngs_receiving: pl.DataFrame | None,
     pbp: pl.DataFrame | None = None,
+    ftn_charting: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """season, gsis_id -> every BASE_METRICS column, for the season the row is labeled (not shifted).
 
@@ -298,7 +321,10 @@ def build_raw_stat_table(
     (v1.5, Phase C) is optional -- see ``src.features.shared.redzone_share_table`` and this
     module's ``REDZONE_THRESHOLDS``; ``None`` (pbp not pulled, or the 2026 season with no
     games played) yields null ``rz_target_share``/``ez_target_share`` columns, same
-    optional-source convention as ``snap_counts``/``ngs_receiving`` below.
+    optional-source convention as ``snap_counts``/``ngs_receiving`` below. ``ftn_charting``
+    (v2.2) is likewise optional -- ``None`` (not pulled, or pre-2022) yields null
+    ``catchable_target_rate``; requires ``pbp`` too (the join is FTN -> pbp -- see
+    ``src.features.shared.ftn_catchable_target_rate_table``).
     """
     totals = season_aggregates(reg).select("season", "gsis_id", "games", "ppr_ppg")
     out = totals.join(_rate_stats(reg), on=["season", "gsis_id"], how="left")
@@ -311,8 +337,19 @@ def build_raw_stat_table(
 
     if snap_counts is not None and rosters is not None:
         out = out.join(_snap_share(snap_counts, rosters), on=["season", "gsis_id"], how="left")
+        touch_sums = _season_touch_sums(reg)
+        out = out.join(
+            sh.per_snap_rate_table(touch_sums, snap_counts, rosters, numerator_col="rec_yards", out_col="yards_per_snap"),
+            on=["season", "gsis_id"], how="left",
+        )
+        out = out.join(
+            sh.per_snap_rate_table(touch_sums, snap_counts, rosters, numerator_col="targets", out_col="targets_per_snap"),
+            on=["season", "gsis_id"], how="left",
+        )
     else:
-        out = out.with_columns(pl.lit(None, dtype=pl.Float64).alias("snap_share"))
+        out = out.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(c) for c in ["snap_share", "yards_per_snap", "targets_per_snap"]]
+        )
 
     if ngs_receiving is not None:
         out = out.join(_ngs_features(ngs_receiving), on=["season", "gsis_id"], how="left")
@@ -330,6 +367,12 @@ def build_raw_stat_table(
         out = out.with_columns(
             [pl.lit(None, dtype=pl.Float64).alias(c) for c in REDZONE_THRESHOLDS]
         )
+
+    if pbp is not None and ftn_charting is not None:
+        catchable = sh.ftn_catchable_target_rate_table(ftn_charting, pbp)
+        out = out.join(catchable, on=["season", "gsis_id"], how="left")
+    else:
+        out = out.with_columns(pl.lit(None, dtype=pl.Float64).alias("catchable_target_rate"))
 
     return out.select(["season", "gsis_id"] + BASE_METRICS)
 
@@ -369,6 +412,7 @@ def build_features_wr(
     ngs_receiving: pl.DataFrame | None = None,
     coaching_changes: pl.DataFrame | None = None,
     pbp: pl.DataFrame | None = None,
+    ftn_charting: pl.DataFrame | None = None,
     vegas_team: pl.DataFrame | None = None,
     scoring_profile: dict | None = None,
 ) -> pl.DataFrame:
@@ -387,7 +431,7 @@ def build_features_wr(
     team_assign = sh.team_assignments(reg)
 
     raw = build_raw_stat_table(
-        reg, team_assign, ff_opportunity, schedules, snap_counts, rosters, ngs_receiving, pbp
+        reg, team_assign, ff_opportunity, schedules, snap_counts, rosters, ngs_receiving, pbp, ftn_charting
     )
 
     target = labels.filter((pl.col("position") == POSITION) & (~pl.col("is_rookie"))).select(
@@ -453,6 +497,7 @@ def load_and_build(
     ngs_receiving_path: Path = NGS_RECEIVING_PATH,
     coaching_changes_path: Path = sh.PATHS["coaching_changes"],
     pbp_path: Path = RAW_DIR / "pbp.parquet",
+    ftn_charting_path: Path = RAW_DIR / "ftn_charting.parquet",
     vegas_team_path: Path = PROCESSED_DIR / "vegas_team.parquet",
     out_path: Path = OUT_PATH,
 ) -> pl.DataFrame:
@@ -468,6 +513,7 @@ def load_and_build(
     ngs_receiving = pl.read_parquet(ngs_receiving_path) if ngs_receiving_path.exists() else None
     coaching_changes = sh.load_coaching_changes(coaching_changes_path)
     pbp = pl.read_parquet(pbp_path) if pbp_path.exists() else None
+    ftn_charting = pl.read_parquet(ftn_charting_path) if ftn_charting_path.exists() else None
     vegas_team = pl.read_parquet(vegas_team_path) if vegas_team_path.exists() else None
 
     out = build_features_wr(
@@ -482,6 +528,7 @@ def load_and_build(
         ngs_receiving=ngs_receiving,
         coaching_changes=coaching_changes,
         pbp=pbp,
+        ftn_charting=ftn_charting,
         vegas_team=vegas_team,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)

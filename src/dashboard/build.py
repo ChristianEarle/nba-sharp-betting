@@ -81,6 +81,7 @@ LABELS_PARQUET_PATH = train.PROCESSED_DIR / "labels.parquet"
 
 POSITIONS = train.POSITIONS  # ("wr", "rb", "te", "qb")
 N_TOP_FEATURES = 15
+DASHBOARD_SEASON = 2026
 ECR_WINDOW_START = dt.date(2026, 6, 1)
 BASELINE_NAMES = ("adp_knows_best", "prior_season_ppg_rank", "age_adjusted_adp")
 BASELINE_LABELS = {
@@ -164,10 +165,54 @@ def _sanitize(obj):
 # --------------------------------------------------------------------------
 
 
-def load_board() -> pd.DataFrame:
+def _assign_player_keys(
+    names: list[str], positions: list[str], gsis_ids: list
+) -> tuple[list[str], list[str]]:
+    """Finding 8: key every player by ``gsis_id`` -- the stable identity every other
+
+    per-player map (feature profiles, ECR trajectory) is about to move to as well --
+    falling back to ``name|POS`` ONLY when a row has no resolved gsis_id (an unmatched
+    player). ``name|POS`` collides for two genuinely different people who share a name
+    and position (it has no season/team to disambiguate further, unlike gsis_id), and
+    silently overwrites one of them in every dict this key indexes into -- that failure
+    mode is exactly what moving to gsis_id closes for every row that DOES resolve.
+
+    Returns (keys, warning_lines) -- `warning_lines` names every key more than one row
+    landed on (gsis_id collisions should never happen; name|POS collisions can, for two
+    genuinely different same-name-same-position players who both lack a gsis_id) so the
+    build script can print them rather than silently letting one row clobber another in
+    every downstream key-indexed map.
+    """
+    keys = [gid if isinstance(gid, str) and gid else f"{name}|{pos}" for name, pos, gid in zip(names, positions, gsis_ids)]
+    counts: dict[str, int] = {}
+    for k in keys:
+        counts[k] = counts.get(k, 0) + 1
+    warnings = [
+        f"key collision: {k!r} used by {c} board rows (two players sharing this key -- "
+        f"one will silently clobber the other in every key-indexed map)"
+        for k, c in sorted(counts.items())
+        if c > 1
+    ]
+    return keys, warnings
+
+
+def load_board(crosswalk_map: dict[tuple[str, str], str] | None = None) -> tuple[pd.DataFrame, list[str]]:
+    """Returns (board, key_collision_warnings). ``crosswalk_map`` is ``name_pos_to_gsis``'s
+
+    {(player_name, POS): gsis_id} -- board_2026's own board CSV carries no gsis_id column
+    (see ``name_pos_to_gsis``'s docstring), so a caller with that map gets every row keyed
+    by gsis_id (Finding 8); a caller without one (e.g. a board-schema-only test) gets the
+    legacy name|POS keying with no warnings, since there's nothing to resolve against.
+    """
     df = pd.read_csv(bd.BOARD_CSV_PATH)
     df["is_rookie"] = df["section"] == "rookie (heuristic)"
-    df["key"] = df["player_name"].astype(str) + "|" + df["pos"].astype(str)
+    if crosswalk_map:
+        gsis_ids = [crosswalk_map.get((name, pos)) for name, pos in zip(df["player_name"], df["pos"])]
+    else:
+        gsis_ids = [None] * len(df)
+    keys, warnings = _assign_player_keys(df["player_name"].tolist(), df["pos"].tolist(), gsis_ids)
+    df["gsis_id"] = gsis_ids
+    df["key"] = keys
     df["display_prob"] = np.where(df["is_rookie"], df["probability_heuristic"], df["probability"])
     # v2.0: hunt_score is whichever engine Deliverable 3's comparison gate picked as
     # primary for that position (classifier `probability` or quantile `p_startable`) --
@@ -176,7 +221,7 @@ def load_board() -> pd.DataFrame:
         df["hunt_score"] = np.where(df["primary_engine"] == "quantile", df.get("p_startable"), df["probability"])
     else:
         df["hunt_score"] = df["probability"]
-    return df
+    return df, warnings
 
 
 def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
@@ -221,6 +266,11 @@ def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
                 "fppg": r["floor_ppg"] if pd.notna(r.get("floor_ppg")) else None,
                 "eppg": r["expected_ppg"] if pd.notna(r.get("expected_ppg")) else None,
                 "cppg": r["ceiling_ppg"] if pd.notna(r.get("ceiling_ppg")) else None,
+                # v2.3: cohort_rank (this year's field, "Projects PosN of 2026" -- the new
+                # headline rank) vs predicted_finish_rank (a typical season with this q50,
+                # historically -- unchanged) -- see src.inference.projections' "Two ranks,
+                # not one" docstring section.
+                "cr": r["cohort_rank"] if pd.notna(r.get("cohort_rank")) else None,
                 "pfr": r["predicted_finish_rank"] if pd.notna(r.get("predicted_finish_rank")) else None,
                 "pel": r["p_elite"] if pd.notna(r.get("p_elite")) else None,
                 "pst": r["p_startable"] if pd.notna(r.get("p_startable")) else None,
@@ -230,7 +280,16 @@ def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
                     if pd.notna(r.get("seg_elite"))
                     else None
                 ),
-                "vg": r["value_gap"] if pd.notna(r.get("value_gap")) else None,
+                # v2.3: the displayed/colored "Value gap" column is value_gap_typical
+                # (predicted_finish_rank-based) -- the holdout audit's metric-decision run
+                # (src.audit.holdout_board_audit.value_gap_metric_comparison) found the new
+                # cohort-based value_gap grades WORSE as a realized-outcome sorter, so the
+                # headline rank display changed (cr, above) but the validated sort/color
+                # metric did not. `vgc` (cohort-based) is kept alongside for anyone reading
+                # the raw row data, e.g. via the board CSV. See outputs/holdout_board_audit.md's
+                # "Metric decision" subsection and README for the full reasoning.
+                "vg": r["value_gap_typical"] if pd.notna(r.get("value_gap_typical")) else None,
+                "vgc": r["value_gap"] if pd.notna(r.get("value_gap")) else None,
                 "aps": bool(r["already_priced_as_starter"]) if pd.notna(r.get("already_priced_as_starter")) else None,
                 "psent": r["projection_sentence"] if pd.notna(r.get("projection_sentence")) else None,
             }
@@ -272,18 +331,27 @@ def top_shap_features(bundles: dict[str, dict], top_n: int = N_TOP_FEATURES) -> 
     return out
 
 
-def feature_profiles(feats: dict[str, pd.DataFrame], top_feats: dict[str, list[str]]) -> dict[str, list[dict]]:
+def feature_profiles(feats: dict[str, pd.DataFrame], top_feats: dict[str, list[str]]) -> tuple[dict[str, list[dict]], list[str]]:
     """{player key: [{feat, label, value, pctl}, ...]} -- within-position percentile
 
     (0-100, ``rank(pct=True)*100``) of each top-SHAP feature, computed fresh
     on the 2026 population each position's feature matrix carries.
+
+    Finding 8: keyed by ``gsis_id`` (falling back to ``name|POS`` only when a row's own
+    ``gsis_id`` is null) -- the same key scheme ``load_board``/``ecr_by_board_key`` use, so
+    a client can join board rows, feature profiles, and ECR trajectories on one identity.
+    Returns (profiles, key_collision_warnings) -- see ``_assign_player_keys``.
     """
     profiles: dict[str, list[dict]] = {}
+    all_warnings: list[str] = []
     for pos, df in feats.items():
         cols = [c for c in top_feats.get(pos, []) if c in df.columns]
         pct = df[cols].rank(pct=True, na_option="keep") * 100.0
+        gsis_ids = df["gsis_id"].tolist() if "gsis_id" in df.columns else [None] * len(df)
+        keys, warnings = _assign_player_keys(df["player_name"].tolist(), [pos.upper()] * len(df), gsis_ids)
+        all_warnings.extend(f"{pos}: {w}" for w in warnings)
         for i in range(len(df)):
-            key = f"{df.iloc[i]['player_name']}|{pos.upper()}"
+            key = keys[i]
             entries = []
             for c in cols:
                 val = df.iloc[i][c]
@@ -292,7 +360,7 @@ def feature_profiles(feats: dict[str, pd.DataFrame], top_feats: dict[str, list[s
                     continue
                 entries.append({"feat": c, "label": feature_label(c), "value": float(val), "pctl": float(p)})
             profiles[key] = entries
-    return profiles
+    return profiles, all_warnings
 
 
 # --------------------------------------------------------------------------
@@ -356,17 +424,31 @@ def _rank_snapshot_deterministic(snap: pl.DataFrame) -> pl.DataFrame:
 
 
 def build_ecr_trajectory(crosswalk: pl.DataFrame) -> tuple[pl.DataFrame, dict]:
-    """All-snapshot ranked ECR rows (season 2026, window >= ECR_WINDOW_START), resolved
+    """All-snapshot ranked ECR rows (season 2026, ECR_WINDOW_START <= window < the season's
 
-    to gsis_id, plus a small coverage-report dict for the final printed
-    summary. Reuses ``src.ingest.adp``'s own snapshot filter
-    (``_load_ecr_preseason``) and per-date dedupe/rank
-    (``_rank_snapshot``) -- applied to every snapshot date in the window
-    instead of only the latest one, which is all ``src.ingest.adp`` itself
-    needs.
+    first REG gameday), resolved to gsis_id, plus a small coverage-report dict for the
+    final printed summary. Reuses ``src.ingest.adp``'s own snapshot filter
+    (``_load_ecr_preseason``) and per-date dedupe/rank (``_rank_snapshot``) -- applied to
+    every snapshot date in the window instead of only the latest one, which is all
+    ``src.ingest.adp`` itself needs.
+
+    Upper bound (Finding 7): capped at 2026's first REG gameday, the exact same source
+    ``adp._snapshot_for_season`` bounds its own preseason snapshot window against
+    (``adp._first_reg_dates()``, from ``schedules.parquet``). Without this cap, rebuilding
+    the dashboard AFTER kickoff would pull weekly IN-SEASON ECR snapshots (which reflect
+    actual performance, not preseason positioning) into what this trajectory presents as
+    "preseason drift" -- a real-performance signal mislabeled as a market-expectation one.
+    If the schedule hasn't been pulled yet for this season (no first-REG date cached),
+    falls back to no upper bound (today's whole-window behavior) rather than dropping
+    every snapshot -- schedules.parquet not covering the season yet is a data-freshness
+    gap, not a reason to blind the trajectory entirely before kickoff can even matter.
     """
     ecr = adp._load_ecr_preseason()
-    window = ecr.filter(pl.col("scrape_date") >= ECR_WINDOW_START).filter(pl.col("pos").is_in(adp.SKILL_POSITIONS))
+    first_reg = adp._first_reg_dates().get(DASHBOARD_SEASON)
+    window = ecr.filter(pl.col("scrape_date") >= ECR_WINDOW_START)
+    if first_reg is not None:
+        window = window.filter(pl.col("scrape_date") < first_reg)
+    window = window.filter(pl.col("pos").is_in(adp.SKILL_POSITIONS))
     dates = sorted(window.select("scrape_date").unique().get_column("scrape_date").to_list())
 
     parts = [_rank_snapshot_deterministic(window.filter(pl.col("scrape_date") == d)) for d in dates]
@@ -380,7 +462,7 @@ def build_ecr_trajectory(crosswalk: pl.DataFrame) -> tuple[pl.DataFrame, dict]:
         name_col="player_name",
         pos_col="position",
         fp_id_col="id",
-        season=2026,
+        season=DASHBOARD_SEASON,
         crosswalk=crosswalk,
     )
     all_ranked = all_ranked.join(matched.select("id", "gsis_id"), on="id", how="left")
@@ -418,11 +500,16 @@ def ecr_series_by_gsis(all_ranked: pl.DataFrame) -> dict[str, dict]:
     return out
 
 
-def ecr_by_board_key(board: pd.DataFrame, crosswalk_map: dict, ecr_by_gsis: dict) -> dict[str, dict]:
+def ecr_by_board_key(board: pd.DataFrame, ecr_by_gsis: dict) -> dict[str, dict]:
+    """{board key: drift series} -- Finding 8: looks the series up by the row's OWN
+
+    ``gsis_id`` column (set by ``load_board``, the same resolution ``board["key"]`` itself
+    is keyed on), rather than re-resolving (name, pos) through a second crosswalk lookup
+    that could in principle disagree with ``load_board``'s.
+    """
     out = {}
-    for key, name, pos in zip(board["key"], board["player_name"], board["pos"]):
-        gid = crosswalk_map.get((name, pos))
-        series = ecr_by_gsis.get(gid) if gid else None
+    for key, gid in zip(board["key"], board["gsis_id"]):
+        series = ecr_by_gsis.get(gid) if isinstance(gid, str) and gid else None
         if series is not None:
             out[key] = series
     return out
@@ -652,8 +739,6 @@ def build_meta(board: pd.DataFrame, bundles: dict[str, dict], ecr_report: dict) 
 
 def assemble_payload() -> tuple[dict, dict]:
     """Returns (payload, report) -- report is printed by main(), never embedded."""
-    board = load_board()
-
     raw = bd.load_raw_frames()
     bundles = {}
     for pos in POSITIONS:
@@ -663,16 +748,28 @@ def assemble_payload() -> tuple[dict, dict]:
 
     feats = build_feature_matrices(raw, bundles)
     top_feats = top_shap_features(bundles)
-    profiles = feature_profiles(feats, top_feats)
+    profiles, profile_key_warnings = feature_profiles(feats, top_feats)
 
     rookie_feats = load_rookie_feature_frame()
     crosswalk_map = name_pos_to_gsis(feats, rookie_feats)
 
+    # Finding 8: every per-player map (board rows, feature profiles, ECR trajectory) is
+    # keyed by gsis_id (falling back to name|POS only when unresolved) -- board needs
+    # crosswalk_map (built above from the same feature frames) to attach its own
+    # gsis_id/key columns, so it loads AFTER crosswalk_map now, not before.
+    board, board_key_warnings = load_board(crosswalk_map)
+
     crosswalk = build_id_map()
     all_ranked, ecr_report = build_ecr_trajectory(crosswalk)
     ecr_gsis = ecr_series_by_gsis(all_ranked)
-    ecr_key = ecr_by_board_key(board, crosswalk_map, ecr_gsis)
+    ecr_key = ecr_by_board_key(board, ecr_gsis)
     coverage_3plus = sum(1 for v in ecr_gsis.values() if v["n"] >= 3)
+
+    key_collision_warnings = board_key_warnings + profile_key_warnings
+    if key_collision_warnings:
+        print(f"WARNING: {len(key_collision_warnings)} player-key collision(s) building the dashboard:")
+        for w in key_collision_warnings:
+            print(f"  {w}")
 
     trust, trust_report = build_trust_view()
     base_rates = historical_base_rates()
@@ -700,6 +797,7 @@ def assemble_payload() -> tuple[dict, dict]:
         "trust_report": trust_report,
         "positions_view_counts": {k: v["count"] for k, v in positions_view.items()},
         "top_features_by_position": top_feats,
+        "key_collision_warnings": key_collision_warnings,
     }
     return payload, report
 
@@ -749,6 +847,7 @@ def main() -> int:
     for pos, r in report["trust_report"].items():
         print(f"  {pos}: metrics.json named lists={r['metrics_json_has_named_lists']}, report.md named lists={r['report_md_has_named_lists']}")
     print(f"positions view counts: {report['positions_view_counts']}")
+    print(f"player-key collisions: {len(report.get('key_collision_warnings', []))}")
     return 0
 
 
