@@ -137,10 +137,18 @@ datasets:
   # IMMEDIATELY after the loader call, before anything is written to disk --
   # nflreadpy.load_pbp() has no column-selection kwarg of its own (checked
   # directly against its signature), so the full ~370-column frame exists only
-  # transiently in memory for one pull; only the 9-column slim frame below is
+  # transiently in memory for one pull; only the slim frame below is
   # ever cached to data/raw/pbp.parquet. Never widen this list without checking
   # the resulting file size stays well under the ~200MB budget (see the README's
   # v1.5 section for the actual size on this build).
+  # v2.2 addition: game_id/play_id -- needed to join FTN's charting data
+  # (data/raw/ftn_charting.parquet, its own nflverse_game_id/nflverse_play_id)
+  # onto pbp for src.features.shared.ftn_catchable_target_rate_table (the
+  # catchable-target-rate efficiency proxy). Verified these are the correct join
+  # keys directly against a live pull: every 2023-season FTN row matches exactly
+  # one pbp play (48,225/48,225) on (game_id, play_id) == (nflverse_game_id,
+  # nflverse_play_id). Kept in the same slim select (not a second pbp pull) --
+  # still well under the size budget, both plain low-cardinality columns.
   pbp:
     loader: load_pbp
     seasonal: true
@@ -157,6 +165,8 @@ datasets:
       - rush_attempt
       - receiver_player_id
       - rusher_player_id
+      - game_id
+      - play_id
       - complete_pass
       - touchdown
   ff_ecr:

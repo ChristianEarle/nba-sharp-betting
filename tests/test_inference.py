@@ -12,6 +12,7 @@ these tests read.
 from __future__ import annotations
 
 import joblib
+import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
@@ -340,6 +341,61 @@ def test_shap_top3_no_bare_article_after_elite_thin() -> None:
     assert not bad.any(), f"{int(bad.sum())} shap_top3 rows have a leading-article grammar bug"
 
 
+def test_humanize_feature_full_key_takes_priority_over_stripped_base() -> None:
+    """Finding 2 regression guard: `_FEATURE_LABELS` is keyed by the FULL feature name
+    (almost always the "_n1" form). `_humanize_feature` must try that exact key BEFORE
+    falling back to the suffix-stripped base -- looking up the stripped base first made
+    every suffixed key in the map dead (e.g. "rec_yards_pg_n1" never matched, always
+    falling through to the raw "rec yards pg" code).
+    """
+    assert board_2026._humanize_feature("rec_yards_pg_n1") == board_2026._FEATURE_LABELS["rec_yards_pg_n1"]
+    assert board_2026._humanize_feature("target_share_n1") == board_2026._FEATURE_LABELS["target_share_n1"]
+    assert "_" not in board_2026._humanize_feature("rec_yards_pg_n1")
+
+
+def test_every_bundle_feature_has_a_plain_language_label() -> None:
+    """Every feature that can appear in any position's SHAP top list must humanize to a
+    plain-language phrase, never a raw code fragment -- audits the full tree + logistic
+    feature-column universe across all four position bundles.
+    """
+    import re as _re
+
+    positions = ("qb", "rb", "te", "wr")
+    specs = {p: train.position_spec(p) for p in positions}
+    if not all(spec.artifact_path.exists() for spec in specs.values()):
+        pytest.skip("model bundles not built; run `python -m src.models.train <pos>`")
+
+    all_feats: set[str] = set()
+    for pos, spec in specs.items():
+        bundle = joblib.load(spec.artifact_path)
+        all_feats |= set(bundle["tree_feature_cols"])
+        all_feats |= set(bundle.get("logistic_feature_cols", []))
+
+    raw_fragment = _re.compile(r"\b(pg|n1|yoy)\b")
+    offenders = []
+    for feat in sorted(all_feats):
+        label = board_2026._humanize_feature(feat)
+        if "_" in label or raw_fragment.search(label):
+            offenders.append((feat, label))
+    assert not offenders, f"features without a plain-language label: {offenders}"
+
+
+def test_shap_top3_chips_never_contain_raw_feature_codes() -> None:
+    """Regenerated-board audit: zero shap_top3 chips contain an underscore or a raw
+    "pg"/"n1"/"yoy" code fragment -- the shipped-CSV symptom of Finding 2's bug.
+    """
+    import re as _re
+
+    df = _board_df()
+    if "shap_top3" not in df.columns:
+        pytest.skip("shap_top3 not in board CSV")
+    s = df["shap_top3"].astype(str)
+    has_underscore = s.str.contains("_", na=False, regex=False)
+    has_raw_fragment = s.str.contains(r"\b(?:pg|n1|yoy)\b", na=False, regex=True)
+    bad = df[has_underscore | has_raw_fragment]
+    assert bad.empty, f"{len(bad)} shap_top3 rows contain raw feature-code fragments: {bad['shap_top3'].tolist()[:5]}"
+
+
 def test_honest_state_label_binary_reflects_value() -> None:
     lo, hi = board_2026.BINARY_FEATURE_STATES["team_change"]
     assert board_2026.honest_state_label("team_change", 0, None) == lo
@@ -360,9 +416,151 @@ def test_honest_state_label_continuous_reflects_value_vs_median() -> None:
     )
 
 
+def test_honest_state_label_trend_compares_to_zero_not_median() -> None:
+    """Finding 3: '_yoy_delta' trend features compare the player's OWN delta to ZERO,
+    never to the position median. A below-median-but-positive delta must still read
+    'Rising', and any negative delta must read 'Falling' -- even when the population
+    median delta is itself negative (the bug: comparing to a negative median could
+    mislabel an actual decliner as 'Rising').
+    """
+    # Named decliner case: median delta among the population is NEGATIVE (-0.05, i.e.
+    # most players' target share fell), but this specific player's own delta is also
+    # negative (-0.02) -- a real decline. Old (median-relative) logic would have called
+    # this "Rising" since -0.02 >= -0.05; the fixed zero-relative logic must call it
+    # "Falling".
+    label = board_2026.honest_state_label("target_share_yoy_delta", -0.02, -0.05)
+    assert label.startswith("Falling"), f"a real decliner (-0.02) must read 'Falling', got {label!r}"
+
+    # A positive delta is always "Rising", even below a higher positive median.
+    label_up = board_2026.honest_state_label("target_share_yoy_delta", 0.01, 0.05)
+    assert label_up.startswith("Rising"), f"a positive delta (0.01) must read 'Rising', got {label_up!r}"
+
+    # Missing median must NOT suppress the trend label -- zero-comparison needs no median.
+    label_no_median = board_2026.honest_state_label("target_share_yoy_delta", 0.03, None)
+    assert label_no_median.startswith("Rising")
+
+
+def test_honest_state_label_level_features_still_use_median() -> None:
+    """Elite/Thin (vs the position median) must still apply to plain level features
+    (non-trend, non-binary) -- only trend features move to the zero comparison.
+    """
+    assert board_2026.honest_state_label("target_share_n1", 0.9, 0.2).startswith("Elite")
+    assert board_2026.honest_state_label("target_share_n1", 0.05, 0.2).startswith("Thin")
+
+
+def test_honest_state_label_returning_competition_custom_states() -> None:
+    """Finding 4: returning_incumbent_share and backfield_committee_count are
+    LOWER_IS_BETTER and render with bespoke 'Light/Heavy returning competition' state
+    text (with a directional arrow), not the generic Elite/Thin prefix (which reads
+    backwards for a "competition" concept).
+    """
+    assert "returning_incumbent_share" in board_2026.LOWER_IS_BETTER
+    assert "backfield_committee_count" in board_2026.LOWER_IS_BETTER
+
+    # A below-median (light) committee count is the GOOD state.
+    light = board_2026.honest_state_label("backfield_committee_count_n1", 1, 3)
+    assert light.startswith("Light returning competition")
+    assert "Elite" not in light and "Thin" not in light
+
+    # An above-median (heavy) committee count is the BAD state.
+    heavy = board_2026.honest_state_label("backfield_committee_count_n1", 4, 3)
+    assert heavy.startswith("Heavy returning competition")
+    assert "Elite" not in heavy and "Thin" not in heavy
+
+
 # --------------------------------------------------------------------------
 # v2.1 addendum: "broke out last season" transparency badge
 # --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Finding 9: score_veterans_batch must hoist the seed-invariant logistic head
+# --------------------------------------------------------------------------
+
+
+class _CountingLogit:
+    """Fake logistic model that counts predict_proba calls -- the loop-hoist regression
+
+    guard: the logistic head is SEED-INVARIANT (fit once, shared across every seed), so
+    it must be called at most ONCE per score_veterans_batch call, never once per seed.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def predict_proba(self, X):
+        self.calls += 1
+        n = len(X)
+        return np.column_stack([np.zeros(n), np.full(n, 0.5)])
+
+
+class _ConstModel:
+    def predict_proba(self, X):
+        n = len(X)
+        return np.column_stack([np.zeros(n), np.full(n, 0.6)])
+
+    def predict(self, X):
+        return np.zeros(len(X))
+
+
+class _IdentityTransform:
+    def transform(self, X):
+        return np.asarray(X)
+
+
+class _IdentityCalibrator:
+    def predict(self, score):
+        return score
+
+
+def test_score_veterans_batch_calls_logistic_head_once_regardless_of_seed_count() -> None:
+    counting_logit = _CountingLogit()
+    df = pd.DataFrame({"f1": [1.0, 2.0, 3.0], "f2": [4.0, 5.0, 6.0], "player_name": ["A", "B", "C"], "gsis_id": ["1", "2", "3"]})
+    bundle = {
+        "tree_feature_cols": ["f1", "f2"],
+        "logistic_feature_cols": ["f1"],
+        "logistic": (counting_logit, _IdentityTransform(), _IdentityTransform()),
+        # THREE seeds, each with a nonzero logistic blend weight -- pre-fix, this would
+        # call predict_proba three times (once per seed) instead of once, shared.
+        "per_seed_models": {
+            1: {"lgbm": _ConstModel(), "xgb": _ConstModel()},
+            2: {"lgbm": _ConstModel(), "xgb": _ConstModel()},
+            3: {"lgbm": _ConstModel(), "xgb": _ConstModel()},
+        },
+        "per_seed": {
+            1: {"blend_weights": {"lgbm": 0.3, "xgb": 0.3, "logistic": 0.4}},
+            2: {"blend_weights": {"lgbm": 0.2, "xgb": 0.4, "logistic": 0.4}},
+            3: {"blend_weights": {"lgbm": 0.4, "xgb": 0.2, "logistic": 0.4}},
+        },
+        "active_calibration_method": "isotonic",
+        "active_calibrator": _IdentityCalibrator(),
+        "lgbm_reg": _ConstModel(),
+        "xgb_reg": _ConstModel(),
+    }
+
+    out = board_2026.score_veterans_batch(bundle, df)
+
+    assert counting_logit.calls == 1, f"logistic head called {counting_logit.calls} times for 3 seeds -- must be exactly 1 (seed-invariant)"
+    assert len(out) == len(df)
+    assert np.isfinite(out["raw_score"]).all()
+
+
+def test_score_veterans_batch_skips_logistic_head_when_every_seed_weight_is_zero() -> None:
+    counting_logit = _CountingLogit()
+    df = pd.DataFrame({"f1": [1.0, 2.0], "f2": [4.0, 5.0], "player_name": ["A", "B"], "gsis_id": ["1", "2"]})
+    bundle = {
+        "tree_feature_cols": ["f1", "f2"],
+        "logistic_feature_cols": ["f1"],
+        "logistic": (counting_logit, _IdentityTransform(), _IdentityTransform()),
+        "per_seed_models": {1: {"lgbm": _ConstModel(), "xgb": _ConstModel()}},
+        "per_seed": {1: {"blend_weights": {"lgbm": 0.5, "xgb": 0.5, "logistic": 0.0}}},
+        "active_calibration_method": "isotonic",
+        "active_calibrator": _IdentityCalibrator(),
+        "lgbm_reg": _ConstModel(),
+        "xgb_reg": _ConstModel(),
+    }
+    board_2026.score_veterans_batch(bundle, df)
+    assert counting_logit.calls == 0, "logistic head must not be called when no seed's blend weight uses it"
 
 
 def test_broke_out_last_season_matches_labels() -> None:

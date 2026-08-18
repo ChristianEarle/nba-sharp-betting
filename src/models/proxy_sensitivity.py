@@ -140,7 +140,15 @@ def run_position(pos: str, raw: dict) -> dict:
 
     arm_results = {}
     for arm, train_start in ARM_TRAIN_START.items():
-        df_full = train.load_modeling_frame(spec.features_path, spec.labels_path, cfg=bundle["cfg"])
+        # Arm A must see the FULL 2014-2025 pool. A position's shipped bundle cfg may itself
+        # carry a `train_season_start` restriction (e.g. RB's v1.7 2020+ real-market-only
+        # decision) -- that restriction is exactly the axis this experiment is testing, so
+        # loading with the raw bundle cfg would silently pre-filter Arm A to Arm B's pool
+        # (collapsing the comparison and leaving Arm A's 2014-start folds empty). Override
+        # `train_season_start` per arm, mirroring pooled_experiment.py's `pool_cfg` pattern.
+        pool_cfg = dict(bundle["cfg"])
+        pool_cfg["train_season_start"] = train_start
+        df_full = train.load_modeling_frame(spec.features_path, spec.labels_path, cfg=pool_cfg)
         df_arm = df_full[df_full["season"] >= train_start].reset_index(drop=True)
         folds = cv.validation_folds(train_start_season=train_start)
         res = _holdout_retrain_and_predict(df_arm, bundle, folds, seed)

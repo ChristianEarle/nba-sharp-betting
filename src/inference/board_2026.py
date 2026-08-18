@@ -176,6 +176,7 @@ _POSITION_BUILD = {
         "ngs_path": feat_wr.NGS_RECEIVING_PATH,
         "needs_snap": True,
         "needs_pbp": True,
+        "needs_ftn": True,  # v2.2: catchable_target_rate (src.features.shared.ftn_catchable_target_rate_table)
     },
     "rb": {
         "build_fn": feat_rb.build_features_rb,
@@ -183,6 +184,7 @@ _POSITION_BUILD = {
         "ngs_path": feat_rb.NGS_RUSHING_PATH,
         "needs_snap": True,
         "needs_pbp": True,
+        "needs_ftn": True,
     },
     "te": {
         "build_fn": feat_te.build_features_te,
@@ -190,6 +192,7 @@ _POSITION_BUILD = {
         "ngs_path": feat_te.NGS_RECEIVING_PATH,
         "needs_snap": True,
         "needs_pbp": True,
+        "needs_ftn": True,
     },
     "qb": {
         "build_fn": feat_qb.build_features_qb,
@@ -197,6 +200,7 @@ _POSITION_BUILD = {
         "ngs_path": feat_qb.NGS_PASSING_PATH,
         "needs_snap": False,
         "needs_pbp": False,  # QB gets no pbp-derived features, per the brief (skip QB for Phase C)
+        "needs_ftn": False,  # QB gets no v2.2 efficiency-proxy columns either -- see src.models.efficiency_gate
     },
 }
 
@@ -216,6 +220,7 @@ ROOKIE_FEATURES_PATH = PROCESSED_DIR / "features_2026_rookies.parquet"
 def load_raw_frames() -> dict:
     ff_opportunity_path = RAW_DIR / "ff_opportunity.parquet"
     pbp_path = RAW_DIR / "pbp.parquet"
+    ftn_charting_path = RAW_DIR / "ftn_charting.parquet"
     return {
         "player_stats": pl.read_parquet(PLAYER_STATS_PATH),
         "ff_opportunity": pl.read_parquet(ff_opportunity_path),
@@ -242,6 +247,10 @@ def load_raw_frames() -> dict:
         # src.features.{wr,rb,te} were built against (see their build_raw_stat_table
         # docstrings), the same "nullable by design" contract as snap_counts/ngs_*.
         "pbp": pl.read_parquet(pbp_path) if pbp_path.exists() else None,
+        # v2.2: FTN charting data (catchable_target_rate) -- 2022+ coverage only, joined
+        # onto pbp by play id (src.features.shared.ftn_catchable_target_rate_table).
+        # Optional, same "nullable, never a raised error" contract as pbp/snap_counts/ngs_*.
+        "ftn_charting": pl.read_parquet(ftn_charting_path) if ftn_charting_path.exists() else None,
     }
 
 
@@ -328,6 +337,8 @@ def build_veteran_feature_matrix(pos: str, raw: dict, bundle: dict) -> pl.DataFr
         kwargs["snap_counts"] = raw["snap_counts"]
     if spec["needs_pbp"]:
         kwargs["pbp"] = raw["pbp"]
+    if spec.get("needs_ftn"):
+        kwargs["ftn_charting"] = raw["ftn_charting"]
     kwargs[spec["ngs_kwarg"]] = raw[spec["ngs_kwarg"]]
 
     out = spec["build_fn"](**kwargs)
@@ -385,6 +396,20 @@ def score_veterans_batch(bundle: dict, df: pd.DataFrame) -> pd.DataFrame:
     active_calibration_method = bundle.get("active_calibration_method", bundle.get("calibration_method"))
     active_calibrator = bundle.get("active_calibrator", bundle.get("calibrator"))
 
+    # The logistic head is SHARED across every seed -- fit once, at the base seed, and
+    # never varies with it (see the docstring above / train.holdout_predictions' own
+    # docstring: "Shared logistic head: fit once, at the base seed -- unchanged from
+    # pre-ensemble"). Its prediction is therefore seed-INVARIANT: computing it inside the
+    # per-seed loop below would recompute the identical array once per seed for no
+    # reason (train.holdout_predictions already hoists this the same way). Computed at
+    # most once, up front, and reused by every seed's blend.
+    logit_pred = None
+    if any(per_seed_weights[seed].get("blend_weights", {}).get("logistic", 0) > 0 for seed in per_seed_models):
+        model, imputer, scaler = bundle["logistic"]
+        logit_cols = bundle["logistic_feature_cols"]
+        X = scaler.transform(imputer.transform(df[logit_cols]))
+        logit_pred = model.predict_proba(X)[:, 1]
+
     seed_scores = []
     for seed, models in per_seed_models.items():
         weights = per_seed_weights[seed]["blend_weights"]
@@ -394,10 +419,7 @@ def score_veterans_batch(bundle: dict, df: pd.DataFrame) -> pd.DataFrame:
         if weights.get("xgb", 0) > 0:
             preds["xgb"] = models["xgb"].predict_proba(df[tree_cols])[:, 1]
         if weights.get("logistic", 0) > 0:
-            model, imputer, scaler = bundle["logistic"]
-            logit_cols = bundle["logistic_feature_cols"]
-            X = scaler.transform(imputer.transform(df[logit_cols]))
-            preds["logistic"] = model.predict_proba(X)[:, 1]
+            preds["logistic"] = logit_pred
         nonzero_weights = {k: w for k, w in weights.items() if k in preds}
         seed_scores.append(train.apply_blend(nonzero_weights, **preds))
     blended = np.mean(np.vstack(seed_scores), axis=0)
@@ -559,6 +581,8 @@ BINARY_FEATURE_STATES: dict[str, tuple[str, str]] = {
     "moved_into_vacancy": ("No clear vacancy move", "Moved into a vacancy"),
     "became_presumptive_starter": ("Not a new QB1", "Became the presumptive starter"),
     "returning_starter": ("No proven returning starter", "Proven starter returns"),
+    "adp_source_proxy": ("Real-market preseason ADP", "Proxy-era (pre-2020) expectation signal"),
+    "adp_source_capped": ("Ranked in the era's expectation signal", "Capped -- no expectation signal reached him"),
 }
 
 # Feature bases where a LOWER raw value is the "good"/"elite" direction --
@@ -576,6 +600,20 @@ LOWER_IS_BETTER = {
     "competition_draft_capital",
     "sack_rate",
     "int_rate",
+    "returning_incumbent_share",
+    "backfield_committee_count",
+}
+
+# Level features where a plain "Elite <label>"/"Thin <label>" chip reads backwards --
+# "Elite backfield competition" sounds like heavy competition is a GOOD thing, when the
+# opposite is true (a crowded returning backfield/receiving corps is bad for a breakout
+# candidate's opportunity). These get bespoke high/low state text instead of the generic
+# Elite/Thin prefix. Keyed by the base feature (after stripping "_n1"/"_yoy_delta");
+# first element = the LOW-raw-value ("good") state, second = HIGH-raw-value ("bad") state
+# -- i.e. matched against LOWER_IS_BETTER's `is_elite` the same way Elite/Thin would be.
+CUSTOM_LEVEL_FEATURE_STATES: dict[str, tuple[str, str]] = {
+    "returning_incumbent_share": ("Light returning competition ▲", "Heavy returning competition ▼"),
+    "backfield_committee_count": ("Light returning competition ▲", "Heavy returning competition ▼"),
 }
 
 
@@ -598,18 +636,30 @@ def honest_state_label(feature: str, raw_value, median) -> str:
         lo, hi = BINARY_FEATURE_STATES[base]
         return hi if float(raw_value) >= 0.5 else lo
 
-    if missing or median is None or pd.isna(median):
-        return label
-
     # _FEATURE_LABELS' phrases were written to read naturally after "boosted
     # by"/"held back by" (e.g. "a deep preseason ranking"); strip a leading
     # article before prefixing Elite/Thin/Rising/Falling so the chip doesn't
     # read "Elite a deep preseason ranking".
     bare = re.sub(r"^(a|an|the)\s+", "", label, flags=re.IGNORECASE)
+
+    if feature.endswith("_yoy_delta"):
+        # Trend features compare the player's OWN year-over-year delta to ZERO, never to
+        # the position median: "Rising" iff raw_value > 0, "Falling" otherwise. Comparing
+        # to the median mislabels decliners whenever the population's median delta is
+        # itself negative (a below-zero player scoring above that negative median would
+        # read as "Rising" despite having actually declined). No median is needed here.
+        if missing:
+            return label
+        return f"{'Rising' if raw_value > 0 else 'Falling'} {bare}"
+
+    # Elite/Thin (vs the position median) applies ONLY to level features.
+    if missing or median is None or pd.isna(median):
+        return label
     higher_is_elite = base not in LOWER_IS_BETTER
     is_elite = (raw_value >= median) if higher_is_elite else (raw_value <= median)
-    if feature.endswith("_yoy_delta"):
-        return f"{'Rising' if raw_value >= median else 'Falling'} {bare}"
+    if base in CUSTOM_LEVEL_FEATURE_STATES:
+        lo_state, hi_state = CUSTOM_LEVEL_FEATURE_STATES[base]
+        return lo_state if is_elite else hi_state
     return f"{'Elite' if is_elite else 'Thin'} {bare}"
 
 
@@ -666,6 +716,7 @@ _FEATURE_LABELS = {
     "yards_per_carry_n1": "yards per carry",
     "rush_td_rate_n1": "rushing touchdown rate",
     "backfield_committee_count_n1": "backfield competition",
+    "returning_incumbent_share_n1": "returning competition",
     "pass_attempts_pg_n1": "pass-attempt volume",
     "pass_yards_pg_n1": "passing yardage",
     "rush_attempts_pg_n1": "rushing volume",
@@ -702,12 +753,61 @@ _FEATURE_LABELS = {
     "ez_target_share_n1": "end-zone-adjacent target share",
     "rz_carry_share_n1": "red-zone carry share",
     "goal_line_carry_share_n1": "goal-line carry share",
+    "years_exp": "years of experience",
+    "air_yards_share_n1": "air yards share",
+    "ngs_efficiency_n1": "Next Gen Stats rushing efficiency",
+    "rush_yards_over_expected_per_att_n1": "rush yards over expected per attempt",
+    # Bare (unsuffixed) fallbacks for every "_n1" concept above -- reached only via
+    # `_humanize_feature`'s stripped-base lookup, i.e. for that concept's "_yoy_delta"
+    # trend column (there is no bare/unsuffixed feature column in any bundle).
+    "target_share": "target share",
+    "wopr": "weighted opportunity",
+    "targets_pg": "target volume",
+    "receptions_pg": "reception volume",
+    "rec_yards_pg": "receiving yardage",
+    "adot": "downfield target depth",
+    "ppr_ppg": "per-game scoring",
+    "expected_ppr_ppg": "expected per-game scoring",
+    "efficiency_residual_pg": "efficiency residual on volume",
+    "yards_per_reception": "yards per catch",
+    "td_rate": "touchdown rate",
+    "snap_share": "snap share",
+    "carry_share": "carry share",
+    "weighted_opportunity_pg": "weighted opportunity",
+    "rush_yards_pg": "rushing volume",
+    "yards_per_carry": "yards per carry",
+    "rush_td_rate": "rushing touchdown rate",
+    "backfield_committee_count": "backfield competition",
+    "returning_incumbent_share": "returning competition",
+    "pass_attempts_pg": "pass-attempt volume",
+    "pass_yards_pg": "passing yardage",
+    "rush_attempts_pg": "rushing volume",
+    "rush_yard_share": "rush yard share",
+    "sack_rate": "sack rate",
+    "int_rate": "interception rate",
+    "avg_separation": "receiving separation",
+    "avg_cushion": "defensive cushion faced",
+    "catch_percentage": "catch rate",
+    "avg_time_to_throw": "time to throw",
+    "cpoe": "completion rate over expected",
+    "rz_target_share": "red-zone target share",
+    "ez_target_share": "end-zone-adjacent target share",
+    "rz_carry_share": "red-zone carry share",
+    "goal_line_carry_share": "goal-line carry share",
+    "air_yards_share": "air yards share",
+    "ngs_efficiency": "Next Gen Stats rushing efficiency",
+    "rush_yards_over_expected_per_att": "rush yards over expected per attempt",
 }
 
 
 def _humanize_feature(name: str) -> str:
+    # _FEATURE_LABELS is keyed by the FULL feature name as it appears in the tree/logistic
+    # column lists (almost always the "_n1" form, e.g. "target_share_n1") -- try that exact
+    # key first. Only fall back to the suffix-stripped base (and, failing that, the raw
+    # code with underscores swapped for spaces) for keys the map doesn't carry verbatim,
+    # e.g. a "_yoy_delta" trend column, which reuses its base feature's phrase + " trend".
     base = re.sub(r"_(n1|yoy_delta)$", "", name)
-    label = _FEATURE_LABELS.get(base, base.replace("_", " "))
+    label = _FEATURE_LABELS.get(name, _FEATURE_LABELS.get(base, base.replace("_", " ")))
     if name.endswith("_yoy_delta"):
         label = f"{label} trend"
     return label

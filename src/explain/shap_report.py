@@ -8,7 +8,11 @@ saved (``data/models/{pos}_model_bundle.joblib``):
    classifier blend that carries a nonzero weight (LGBM and/or XGB — every
    position's frozen ``blend_weights`` gives the logistic head weight 0,
    see "Why the logistic head is skipped" below), computed on the pooled
-   validation rows (``VALIDATION_SEASONS``, ``in_training_pool==1`` — the
+   validation rows (this position's ACTUAL validation seasons, per
+   ``validation_seasons_for``/``cv.validation_folds`` at its own
+   ``cfg["train_season_start"]`` — not the fixed ``VALIDATION_SEASONS``
+   constant, which would leak training-only years into a restricted-pool
+   position's (e.g. RB's) SHAP universe; ``in_training_pool==1`` — the
    exact universe ``src.models.train`` tunes and calibrates against, not
    the holdout years and not 2026).
 2. **Per-player attribution** (``player_shap_attribution`` /
@@ -61,8 +65,9 @@ import numpy as np
 import pandas as pd
 import shap
 
+from src.models import cv
 from src.models import train
-from src.models.cv import VALIDATION_SEASONS
+from src.models.cv import TRAIN_START_SEASON
 
 REPO_ROOT = train.REPO_ROOT
 OUTPUTS_DIR = train.OUTPUTS_DIR
@@ -94,14 +99,34 @@ def nonzero_tree_models(bundle: dict) -> dict[str, float]:
     return out
 
 
+def validation_seasons_for(bundle: dict) -> list[int]:
+    """The position's ACTUAL validation `val_season`s -- derived from ``cv.validation_folds``
+
+    at this bundle's own ``cfg["train_season_start"]``, never the fixed ``VALIDATION_SEASONS``
+    constant (2020-2023). A position whose config restricts ``train_season_start`` (e.g. RB's
+    v1.7 2020+ real-market-only pool) legitimately validates on FEWER, LATER seasons only --
+    ``cv.validation_folds(2020)`` yields val_season in {2022, 2023}, since 2020 and 2021 don't
+    have the ``MIN_FOLD_TRAIN_YEARS``-season training window a fold needs (see
+    ``cv.validation_folds``'s docstring) and are TRAINING-only years for that position, not
+    out-of-fold validation years. Using the fixed constant for such a position would leak
+    training-only rows into what's supposed to be an out-of-fold SHAP universe.
+    """
+    train_start = bundle["cfg"].get("train_season_start", TRAIN_START_SEASON)
+    folds = cv.validation_folds(train_start_season=train_start)
+    return [f.val_season for f in folds]
+
+
 def pooled_validation_frame(pos: str, bundle: dict) -> pd.DataFrame:
     """The exact universe Phase 4 tunes/calibrates against: in_training_pool==1 rows
 
-    restricted to VALIDATION_SEASONS (2020-2023) — never the holdout years, never 2026.
+    restricted to this position's ACTUAL validation seasons (``validation_seasons_for`` --
+    respecting ``cfg["train_season_start"]``, not the fixed VALIDATION_SEASONS constant) —
+    never the holdout years, never 2026, and never a training-only season smuggled in by a
+    restricted-pool position.
     """
     spec = train.position_spec(pos)
     df = train.load_modeling_frame(spec.features_path, spec.labels_path, cfg=bundle["cfg"])
-    return df[df["season"].isin(VALIDATION_SEASONS)].reset_index(drop=True)
+    return df[df["season"].isin(validation_seasons_for(bundle))].reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------
@@ -167,6 +192,7 @@ def global_shap_plot(pos: str, out_path: Path | None = None) -> pd.DataFrame:
     tree_cols = bundle["tree_feature_cols"]
     val_df = pooled_validation_frame(pos, bundle)
     X = val_df[tree_cols]
+    val_seasons = validation_seasons_for(bundle)
 
     weights = nonzero_tree_models(bundle)
     n = len(weights)
@@ -177,7 +203,7 @@ def global_shap_plot(pos: str, out_path: Path | None = None) -> pd.DataFrame:
         sv = raw_shap_values(bundle, key, X)
         plt.sca(ax)
         shap.summary_plot(sv, X, show=False, plot_size=None)
-        ax.set_title(f"{pos.upper()} — {key} (blend weight {w:.2f}), pooled validation {VALIDATION_SEASONS[0]}-{VALIDATION_SEASONS[-1]}")
+        ax.set_title(f"{pos.upper()} — {key} (blend weight {w:.2f}), pooled validation {val_seasons[0]}-{val_seasons[-1]}")
     fig.tight_layout()
 
     out_path = out_path or (OUTPUTS_DIR / f"shap_{pos}.png")

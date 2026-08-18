@@ -178,3 +178,41 @@ def test_promote_position_writes_bundle_and_config(tmp_path) -> None:
     assert real_spec.artifact_path.exists()
     real_bundle_still = joblib.load(real_spec.artifact_path)
     assert set(ve.VEGAS_COLS).isdisjoint(set(real_bundle_still["tree_feature_cols"]))
+
+
+def test_promote_position_refits_active_calibrator_and_per_seed_n_estimators(tmp_path) -> None:
+    """Finding 5 regression guard: promotion must NOT leave `active_calibrator`/`per_seed`
+    as stale copies of the pre-promotion (non-vegas) bundle -- both must be refit against
+    the vegas-augmented score distribution, since `train.holdout_predictions` scores the
+    board through `active_calibrator`, not the legacy single-seed one.
+    """
+    _skip_if_missing("qb")
+    real_spec = train.position_spec("qb")
+    bundle = joblib.load(real_spec.artifact_path)
+    if not bundle.get("per_seed"):
+        pytest.skip("qb bundle carries no v1.7 per_seed ensemble to exercise this regression guard against")
+    df = train.load_modeling_frame(real_spec.features_path, real_spec.labels_path, cfg=bundle["cfg"])
+
+    fake_config_path = tmp_path / "model_qb.yaml"
+    fake_config_path.write_text("some: config\nexcluded_features: [implied_ppg, implied_win_prob, has_vegas]\nmore: stuff\n")
+    fake_artifact_path = tmp_path / "qb_model_bundle.joblib"
+    fake_spec = replace(real_spec, config_path=fake_config_path, artifact_path=fake_artifact_path)
+
+    ve.promote_position(fake_spec, bundle, df)
+    new_bundle = joblib.load(fake_artifact_path)
+
+    # The refit active_calibrator must be a DIFFERENT fitted object than the stale one
+    # copied in via `dict(bundle)` -- not the same Python object, and not numerically
+    # identical on a shared probe score (a Platt LogisticRegression's own coefficients).
+    assert new_bundle["active_calibrator"] is not bundle["active_calibrator"]
+    old_coef = np.asarray(bundle["active_calibrator"].coef_)
+    new_coef = np.asarray(new_bundle["active_calibrator"].coef_)
+    assert old_coef.shape != new_coef.shape or not np.allclose(old_coef, new_coef), (
+        "active_calibrator is numerically identical after promotion -- looks stale, not refit"
+    )
+
+    # per_seed's n_estimators must be recomputed too (every seed key preserved, values refit).
+    assert set(new_bundle["per_seed"].keys()) == set(bundle["per_seed"].keys())
+    for s in bundle["per_seed"]:
+        assert new_bundle["per_seed"][s]["lgbm_final_n_estimators"] is not None
+        assert new_bundle["per_seed"][s]["xgb_final_n_estimators"] is not None

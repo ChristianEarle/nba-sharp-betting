@@ -19,9 +19,12 @@ writes or retrains them.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import re
 
 import pandas as pd
+import polars as pl
 import pytest
 
 from src.dashboard import build
@@ -56,15 +59,28 @@ def assembled():
 # --------------------------------------------------------------------------
 
 
+_GSIS_KEY_RE = re.compile(r"^\d{2}-\d{7}$")
+
+
 def test_all_board_players_present_in_payload(assembled) -> None:
+    """Finding 8: board rows are keyed by gsis_id (falling back to name|POS only when a
+
+    row has no resolved gsis_id) -- every payload key must be unique, most real board
+    rows should resolve to a real gsis_id, and every fallback name|POS key must trace
+    back to a real (unresolved) CSV row.
+    """
     payload, _ = assembled
     csv_df = pd.read_csv(bd.BOARD_CSV_PATH)
     assert len(payload["board"]) == len(csv_df)
     keys = [r["key"] for r in payload["board"]]
-    assert len(keys) == len(set(keys)), "duplicate player|pos keys on the board payload"
-    # every CSV row's (player_name, pos) shows up as a payload key
-    csv_keys = set(csv_df["player_name"].astype(str) + "|" + csv_df["pos"].astype(str))
-    assert csv_keys == set(keys)
+    assert len(keys) == len(set(keys)), "duplicate player keys on the board payload"
+
+    resolved = [k for k in keys if _GSIS_KEY_RE.match(k)]
+    assert len(resolved) > 0.5 * len(keys), "fewer than half of board keys resolved to a real gsis_id"
+
+    csv_pairs = set(zip(csv_df["player_name"].astype(str), csv_df["pos"].astype(str)))
+    fallback_pairs = {(r["n"], r["p"]) for r, k in zip(payload["board"], keys) if not _GSIS_KEY_RE.match(k)}
+    assert fallback_pairs <= csv_pairs, "a name|POS fallback key doesn't trace back to a real board row"
 
 
 def test_percentiles_within_bounds(assembled) -> None:
@@ -168,3 +184,141 @@ def test_build_twice_is_byte_identical(assembled) -> None:
     path2, _ = build.build_dashboard()
     bytes2 = path2.read_bytes()
     assert bytes1 == bytes2, "make dashboard is not deterministic given unchanged inputs"
+
+
+# --------------------------------------------------------------------------
+# Finding 7: build_ecr_trajectory must cap at the season's first REG gameday
+# --------------------------------------------------------------------------
+
+_EMPTY_CROSSWALK = pl.DataFrame(
+    schema={
+        "mfl_id": pl.Utf8, "gsis_id": pl.Utf8, "fantasypros_id": pl.Utf8, "sleeper_id": pl.Utf8,
+        "name": pl.Utf8, "merge_name": pl.Utf8, "position": pl.Utf8, "draft_year": pl.Int64, "birthdate": pl.Utf8,
+    }
+)
+
+
+def _synthetic_ecr_snapshots() -> pl.DataFrame:
+    """Two preseason snapshots (pre-kickoff) plus one POST-kickoff snapshot -- the
+
+    post-kickoff row reflects real in-season performance (Player B rockets from
+    pos_rank 2 to pos_rank 1), which must NEVER be mistaken for preseason market drift.
+    """
+    rows = [
+        # pre-kickoff snapshot 1: A ranked ahead of B
+        {"scrape_date": dt.date(2026, 6, 15), "pos": "WR", "id": "A", "player": "Player A", "ecr": 1.0},
+        {"scrape_date": dt.date(2026, 6, 15), "pos": "WR", "id": "B", "player": "Player B", "ecr": 2.0},
+        # pre-kickoff snapshot 2: unchanged
+        {"scrape_date": dt.date(2026, 8, 20), "pos": "WR", "id": "A", "player": "Player A", "ecr": 1.0},
+        {"scrape_date": dt.date(2026, 8, 20), "pos": "WR", "id": "B", "player": "Player B", "ecr": 2.0},
+        # POST-kickoff snapshot (after the synthetic 2026-09-04 first REG gameday below):
+        # B overtakes A on the back of real Week-1 performance, not preseason drift.
+        {"scrape_date": dt.date(2026, 9, 15), "pos": "WR", "id": "A", "player": "Player A", "ecr": 2.0},
+        {"scrape_date": dt.date(2026, 9, 15), "pos": "WR", "id": "B", "player": "Player B", "ecr": 1.0},
+    ]
+    return pl.DataFrame(rows)
+
+
+def test_build_ecr_trajectory_excludes_post_kickoff_snapshot(monkeypatch) -> None:
+    monkeypatch.setattr(build.adp, "_load_ecr_preseason", lambda: _synthetic_ecr_snapshots())
+    monkeypatch.setattr(build.adp, "_first_reg_dates", lambda: {build.DASHBOARD_SEASON: dt.date(2026, 9, 4)})
+    # Redirect id_map's review-CSV write off the real, checked-in data/id_map_review.csv --
+    # every synthetic row is deliberately unmatched against an empty crosswalk.
+    real_match_to_gsis = build.match_to_gsis
+
+    def _match_to_gsis_tmp(*args, **kwargs):
+        kwargs.setdefault("review_path", tmp_review_path)
+        return real_match_to_gsis(*args, **kwargs)
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp_review_path = Path(td) / "review.csv"
+        monkeypatch.setattr(build, "match_to_gsis", _match_to_gsis_tmp)
+
+        all_ranked, report = build.build_ecr_trajectory(_EMPTY_CROSSWALK)
+
+    dates = set(all_ranked.select("scrape_date").unique().get_column("scrape_date").to_list())
+    assert dt.date(2026, 9, 15) not in dates, "a post-kickoff ECR snapshot leaked into the preseason trajectory"
+    assert dates == {dt.date(2026, 6, 15), dt.date(2026, 8, 20)}
+    assert report["n_snapshot_dates"] == 2
+
+
+# --------------------------------------------------------------------------
+# Finding 8: gsis_id keying (falling back to name|POS only when unresolved)
+# --------------------------------------------------------------------------
+
+
+def test_assign_player_keys_prefers_gsis_id() -> None:
+    keys, warnings = build._assign_player_keys(
+        ["Player A", "Player B", "Player C"], ["WR", "RB", "TE"], ["00-0001111", None, "00-0003333"]
+    )
+    assert keys == ["00-0001111", "Player B|RB", "00-0003333"]
+    assert warnings == []
+
+
+def test_assign_player_keys_warns_on_name_pos_collision() -> None:
+    """Two genuinely different players sharing a name+position, both unresolved to a
+
+    gsis_id, collide on the name|POS fallback key -- must be reported, not silently let
+    one clobber the other in every key-indexed map.
+    """
+    keys, warnings = build._assign_player_keys(
+        ["Player A", "Player A"], ["WR", "WR"], [None, None]
+    )
+    assert keys == ["Player A|WR", "Player A|WR"]
+    assert len(warnings) == 1
+    assert "Player A|WR" in warnings[0]
+
+
+def test_assign_player_keys_no_collision_when_gsis_ids_differ() -> None:
+    keys, warnings = build._assign_player_keys(
+        ["Player A", "Player A"], ["WR", "WR"], ["00-0001111", "00-0002222"]
+    )
+    assert keys == ["00-0001111", "00-0002222"]
+    assert warnings == []
+
+
+def test_load_board_and_feature_profiles_and_ecr_use_the_same_key_scheme(assembled) -> None:
+    """Board rows, feature profiles, and ECR trajectories must all key a given resolved
+
+    player identically (its gsis_id) -- the whole point of Finding 8's fix is that a
+    client can join these three maps on one shared key.
+    """
+    payload, _ = assembled
+    board_keys = {r["key"] for r in payload["board"]}
+    feature_keys = set(payload["features"].keys())
+    ecr_keys = set(payload["ecr"].keys())
+    # every feature-profile / ECR key must be a real board key (never an orphan key
+    # under a different scheme that the client couldn't join back to a board row).
+    assert feature_keys <= board_keys
+    assert ecr_keys <= board_keys
+
+
+def test_build_ecr_trajectory_falls_back_to_no_cap_when_schedule_missing(monkeypatch) -> None:
+    """A season whose schedule hasn't been pulled yet (no cached first-REG date) must not
+
+    have its whole trajectory blanked -- falls back to the pre-fix unbounded window rather
+    than silently dropping every snapshot.
+    """
+    monkeypatch.setattr(build.adp, "_load_ecr_preseason", lambda: _synthetic_ecr_snapshots())
+    monkeypatch.setattr(build.adp, "_first_reg_dates", lambda: {})  # no cached schedule for DASHBOARD_SEASON
+
+    real_match_to_gsis = build.match_to_gsis
+
+    def _match_to_gsis_tmp(*args, **kwargs):
+        kwargs.setdefault("review_path", tmp_review_path)
+        return real_match_to_gsis(*args, **kwargs)
+
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp_review_path = Path(td) / "review.csv"
+        monkeypatch.setattr(build, "match_to_gsis", _match_to_gsis_tmp)
+
+        all_ranked, report = build.build_ecr_trajectory(_EMPTY_CROSSWALK)
+
+    dates = set(all_ranked.select("scrape_date").unique().get_column("scrape_date").to_list())
+    assert dates == {dt.date(2026, 6, 15), dt.date(2026, 8, 20), dt.date(2026, 9, 15)}

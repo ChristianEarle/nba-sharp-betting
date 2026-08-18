@@ -213,36 +213,89 @@ def promote_position(spec: train.PositionSpec, bundle: dict, df: pd.DataFrame) -
     Also empties ``configs/model_{pos}.yaml``'s ``excluded_features`` for this position so a
     future ``python -m src.models.train {pos}`` run (a real Optuna retrain) keeps including
     these features rather than silently reverting to v1.5.
+
+    v1.7 seed ensemble (Finding 5 fix): a shipped bundle's raw score is the MEAN of every
+    seed's own blended OOF prediction (``train.ensemble_blend_and_pool``), calibrated
+    through ``bundle["active_calibrator"]`` -- a Platt model fit on THAT ensemble score's
+    distribution (``train.holdout_predictions`` docstring). Adding the Vegas columns shifts
+    every seed's raw score distribution, so BOTH must be recomputed here or the promoted
+    bundle would silently score through a calibrator fit on the pre-promotion distribution
+    -- exactly the stale-calibrator bug this fix closes. What stays frozen (no new Optuna,
+    matching this module's whole premise): every seed's own ``lgbm_params``/``xgb_params``/
+    ``blend_weights`` (``bundle["per_seed"]``) are reused unchanged; only each seed's OOF
+    predictions (and the n_estimators/calibrator that mechanically follow from them, exactly
+    as ``run_full_pipeline`` derives them) are recomputed against the vegas-augmented
+    ``tree_feature_cols``.
     """
     vegas_tree_cols = list(bundle["tree_feature_cols"]) + list(VEGAS_COLS)
     logit_cols = bundle["logistic_feature_cols"]
     folds = train.validation_folds()
     seed = bundle["seed"]
 
-    lgbm_oof, _, lgbm_best_iters = train.classifier_oof(df, vegas_tree_cols, folds, "lgbm", bundle["lgbm_params"], seed)
-    xgb_oof, _, xgb_best_iters = train.classifier_oof(df, vegas_tree_cols, folds, "xgb", bundle["xgb_params"], seed)
+    # Shared logistic head OOF: the curated logistic subset never gains the Vegas columns
+    # (module docstring's "Logistic head" note), so it is identical across every seed and
+    # unaffected by promotion -- computed once, exactly as the pre-ensemble pipeline did.
     logit_oof, _ = train.logistic_oof(df, logit_cols, folds, bundle["logistic_C"], seed)
 
-    base = lgbm_oof[["season", "gsis_id", "breakout"]].copy()
-    base["pred_lgbm"] = lgbm_oof["pred"].to_numpy()
-    base = base.merge(xgb_oof[["season", "gsis_id", "pred"]].rename(columns={"pred": "pred_xgb"}), on=["season", "gsis_id"], how="inner")
-    base = base.merge(logit_oof[["season", "gsis_id", "pred"]].rename(columns={"pred": "pred_logistic"}), on=["season", "gsis_id"], how="inner")
-    assert len(base) == len(lgbm_oof), f"{spec.position}: promotion OOF rows misaligned across model types"
-    base["pred_blend"] = train.apply_blend(bundle["blend_weights"], lgbm=base["pred_lgbm"], xgb=base["pred_xgb"], logistic=base["pred_logistic"])
+    per_seed_spec = bundle.get("per_seed") or {
+        seed: {"lgbm_params": bundle["lgbm_params"], "xgb_params": bundle["xgb_params"], "blend_weights": bundle["blend_weights"]}
+    }
 
+    new_per_seed: dict[int, dict] = {}
+    seed_blend_cols = []
+    base = None  # the base seed's own pooled OOF frame -- feeds the legacy single-seed calibrator
+    for s, info in per_seed_spec.items():
+        lgbm_oof_s, _, lgbm_best_iters_s = train.classifier_oof(df, vegas_tree_cols, folds, "lgbm", info["lgbm_params"], s)
+        xgb_oof_s, _, xgb_best_iters_s = train.classifier_oof(df, vegas_tree_cols, folds, "xgb", info["xgb_params"], s)
+
+        merged = lgbm_oof_s[["season", "gsis_id", "breakout"]].copy()
+        merged["pred_lgbm"] = lgbm_oof_s["pred"].to_numpy()
+        merged = merged.merge(xgb_oof_s[["season", "gsis_id", "pred"]].rename(columns={"pred": "pred_xgb"}), on=["season", "gsis_id"], how="inner")
+        merged = merged.merge(logit_oof[["season", "gsis_id", "pred"]].rename(columns={"pred": "pred_logistic"}), on=["season", "gsis_id"], how="inner")
+        assert len(merged) == len(lgbm_oof_s), f"{spec.position}: promotion OOF rows misaligned across model types (seed {s})"
+        merged["pred_blend"] = train.apply_blend(info["blend_weights"], lgbm=merged["pred_lgbm"], xgb=merged["pred_xgb"], logistic=merged["pred_logistic"])
+
+        new_per_seed[s] = {
+            "lgbm_params": info["lgbm_params"],
+            "xgb_params": info["xgb_params"],
+            "lgbm_final_n_estimators": int(round(np.mean(lgbm_best_iters_s))),
+            "xgb_final_n_estimators": int(round(np.mean(xgb_best_iters_s))),
+            "blend_weights": info["blend_weights"],
+            "blend_pr_auc": info.get("blend_pr_auc"),
+        }
+        seed_blend_cols.append(merged.set_index(["season", "gsis_id"])["pred_blend"].rename(f"seed_{s}"))
+        if s == seed:
+            base = merged
+
+    assert base is not None, f"{spec.position}: base seed {seed} missing from per_seed spec"
+    stacked = pd.concat(seed_blend_cols, axis=1)
+    assert not stacked.isna().any().any(), f"{spec.position}: seed OOF pools misaligned across vegas-refit seeds"
+    ensemble_pooled = base[["season", "gsis_id", "breakout"]].copy()
+    ensemble_pooled["pred_blend"] = stacked.mean(axis=1).to_numpy()
+
+    # Refit the ACTIVE Platt calibrator -- the one train.holdout_predictions actually
+    # scores the board through -- against the vegas-shifted ensemble score distribution.
+    active_calibrator = train.fit_platt(ensemble_pooled["breakout"], ensemble_pooled["pred_blend"])
+
+    # Legacy single-(base-)seed fields: unchanged shape from pre-ensemble, kept for any
+    # code still reading a plain single-model calibrator off the bundle.
     calib_method, calibrator, calib_diag = train.choose_calibration(base["breakout"], base["pred_blend"])
     smoothed = train.SmoothedIsotonic().fit(base["pred_blend"].to_numpy(), base["breakout"].to_numpy())
 
     new_frozen = dict(bundle)
     new_frozen["tree_feature_cols"] = vegas_tree_cols
-    new_frozen["lgbm_final_n_estimators"] = int(round(np.mean(lgbm_best_iters)))
-    new_frozen["xgb_final_n_estimators"] = int(round(np.mean(xgb_best_iters)))
+    new_frozen["lgbm_final_n_estimators"] = new_per_seed[seed]["lgbm_final_n_estimators"]
+    new_frozen["xgb_final_n_estimators"] = new_per_seed[seed]["xgb_final_n_estimators"]
     new_frozen["calibration_method"] = calib_method
     new_frozen["calibrator"] = calibrator
     new_frozen["calibration_diag"] = calib_diag
     new_frozen["smoothed_calibration_method"] = "smoothed_isotonic"
     new_frozen["smoothed_calibrator"] = smoothed
     new_frozen["pooled_oof_val"] = base[["season", "gsis_id", "pred_blend", "breakout"]].copy()
+    new_frozen["per_seed"] = new_per_seed
+    new_frozen["pooled_oof_val_ensemble"] = ensemble_pooled[["season", "gsis_id", "breakout", "pred_blend"]].copy()
+    new_frozen["active_calibration_method"] = "platt"
+    new_frozen["active_calibrator"] = active_calibrator
 
     new_frozen["cfg"] = dict(bundle["cfg"])
     new_frozen["cfg"]["excluded_features"] = []

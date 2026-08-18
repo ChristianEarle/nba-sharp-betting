@@ -641,6 +641,115 @@ def empty_redzone_share_table(names: list[str]) -> pl.DataFrame:
 
 
 # --------------------------------------------------------------------------
+# Efficiency proxies (v2.2, inference-safe YPRR substitutes) -- true
+# yards-per-route-run is impossible to compute (route-participation data is
+# dead after 2023, see README's Known Limitations), so these approximate
+# "how efficient is this player with the offensive snaps/targets he
+# actually gets" from data that IS still fresh:
+#   - yards_per_snap / targets_per_snap: season yards-or-targets divided by
+#     that player-season's total offensive snaps (``snap_counts.parquet``,
+#     resolved to gsis_id via the same pfr_id crosswalk
+#     ``snap_share_from_counts`` uses). Nullable wherever the snap
+#     crosswalk doesn't resolve -- never guessed.
+#   - catchable_target_rate: share of a player's targeted pass plays FTN
+#     charted as a catchable ball (``data/raw/ftn_charting.parquet``,
+#     2022+ only -- FTN's own charting-coverage start), joined onto pbp by
+#     play id (see ``ftn_catchable_target_rate_table``'s docstring for the
+#     exact join keys). Nullable pre-2022 and wherever FTN has no coverage
+#     for that game.
+# Both go through the capacity gate (``src.models.efficiency_gate``) before
+# shipping in any position's model: kept only if they don't regress
+# holdout top-10 precision and don't regress PR-AUC by more than 0.01 at
+# FROZEN hyperparameters, per position.
+# --------------------------------------------------------------------------
+
+
+def season_offense_snaps_table(snap_counts: pl.DataFrame, rosters: pl.DataFrame) -> pl.DataFrame:
+    """season, gsis_id -> offense_snaps: total REG-season offensive snaps played.
+
+    Same pfr_player_id -> gsis_id resolution ``snap_share_from_counts`` uses (rosters' own
+    (season, pfr_id, gsis_id) crosswalk, deduped). A row with no crosswalk match is dropped
+    here, not guessed -- joining a numerator against this table then produces null (never
+    0) for that player-season, a real "no snap count on file," not "played zero snaps."
+    """
+    reg = snap_counts.filter(pl.col("game_type") == "REG")
+    xwalk = (
+        rosters.filter(pl.col("pfr_id").is_not_null())
+        .select("season", "pfr_id", "gsis_id")
+        .unique()
+    )
+    j = reg.join(xwalk, left_on=["season", "pfr_player_id"], right_on=["season", "pfr_id"], how="left")
+    j = j.filter(pl.col("gsis_id").is_not_null())
+    return j.group_by(["season", "gsis_id"]).agg(pl.col("offense_snaps").sum().alias("offense_snaps"))
+
+
+def per_snap_rate_table(
+    season_totals: pl.DataFrame,
+    snap_counts: pl.DataFrame,
+    rosters: pl.DataFrame,
+    *,
+    numerator_col: str,
+    out_col: str,
+) -> pl.DataFrame:
+    """season, gsis_id -> {out_col}: season_totals[numerator_col] / that player-season's
+
+    total offensive snaps (``season_offense_snaps_table``). ``season_totals`` must carry
+    ``season``, ``gsis_id``, ``numerator_col`` (a season-level SUM, e.g. season receiving
+    yards or season targets -- not a per-game rate). Null wherever either side is missing
+    or the snap total is 0 (``safe_div``).
+    """
+    snaps = season_offense_snaps_table(snap_counts, rosters)
+    out = season_totals.select("season", "gsis_id", numerator_col).join(snaps, on=["season", "gsis_id"], how="left")
+    out = out.with_columns(safe_div(pl.col(numerator_col), pl.col("offense_snaps")).alias(out_col))
+    return out.select("season", "gsis_id", out_col)
+
+
+# FTN's charting coverage begins here (configs/data.yaml's `ftn_charting` entry:
+# first_available: 2022) -- catchable_target_rate is structurally null before this season,
+# same "nullable, not guessed" contract as every other optional-source proxy in this module.
+FTN_CHARTING_FIRST_SEASON = 2022
+
+
+def ftn_catchable_target_rate_table(ftn_charting: pl.DataFrame, pbp_full: pl.DataFrame) -> pl.DataFrame:
+    """season, gsis_id -> catchable_target_rate: share of a player's TARGETED pass plays
+
+    FTN charted as ``is_catchable_ball`` (2022+ only -- FTN_CHARTING_FIRST_SEASON).
+
+    Join keys (verified directly against this build's cached files: every 2023 FTN row
+    matches exactly one pbp play, 48,225/48,225): FTN's own
+    (``nflverse_game_id``, ``nflverse_play_id``) == pbp's (``game_id``, ``play_id``) --
+    ``pbp_full`` needs those two columns on top of the slim 9-column pull
+    ``src.features.shared.redzone_share_table`` uses; see ``configs/data.yaml``'s ``pbp``
+    entry's v2.2 `select_columns` addition. The player is identified by pbp's own
+    ``receiver_player_id``, which IS already a gsis_id (same as ``redzone_share_table`` --
+    no separate crosswalk needed here, unlike snap_counts' pfr_id).
+
+    A play with no charted receiver (``receiver_player_id`` null -- a run, spike, or
+    untagged throwaway) is excluded from both numerator and denominator; a player-season
+    with zero charted targets that year has no row in this table at all (left-joins
+    against it null out, never zero -- "we don't know," not "he wasn't catchable").
+    """
+    ftn = ftn_charting.select(
+        "season",
+        "nflverse_game_id",
+        pl.col("nflverse_play_id").cast(pl.Int32).alias("nflverse_play_id"),
+        "is_catchable_ball",
+    )
+    pbp_keys = pbp_full.select(
+        pl.col("game_id"),
+        pl.col("play_id").cast(pl.Int32),
+        "receiver_player_id",
+    ).filter(pl.col("receiver_player_id").is_not_null())
+    joined = ftn.join(
+        pbp_keys, left_on=["nflverse_game_id", "nflverse_play_id"], right_on=["game_id", "play_id"], how="inner"
+    )
+    out = joined.group_by(["season", "receiver_player_id"]).agg(
+        pl.col("is_catchable_ball").cast(pl.Float64).mean().alias("catchable_target_rate")
+    )
+    return out.rename({"receiver_player_id": "gsis_id"}).select("season", "gsis_id", "catchable_target_rate")
+
+
+# --------------------------------------------------------------------------
 # Competition draft capital
 # --------------------------------------------------------------------------
 

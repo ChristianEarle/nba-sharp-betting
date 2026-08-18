@@ -126,6 +126,7 @@ def build_features_te(
     ngs_receiving: pl.DataFrame | None = None,
     coaching_changes: pl.DataFrame | None = None,
     pbp: pl.DataFrame | None = None,
+    ftn_charting: pl.DataFrame | None = None,
     vegas_team: pl.DataFrame | None = None,
     scoring_profile: dict | None = None,
 ) -> pl.DataFrame:
@@ -133,9 +134,10 @@ def build_features_te(
 
     Same builders as ``src.features.wr.build_features_wr`` (receiving
     family is identical, v1.5 pbp-derived rz_target_share/ez_target_share
-    included), swapped to the TE population and TE-scoped competition
-    draft capital. Every argument is a polars DataFrame, not a path — see
-    WR's docstring for why (the leakage test exploits this directly).
+    and v2.2 snap/FTN-derived efficiency proxies included), swapped to the
+    TE population and TE-scoped competition draft capital. Every argument
+    is a polars DataFrame, not a path — see WR's docstring for why (the
+    leakage test exploits this directly).
     """
     if scoring_profile is None:
         scoring_profile = load_scoring_config()
@@ -144,7 +146,7 @@ def build_features_te(
     team_assign = sh.team_assignments(reg)
 
     raw = build_raw_stat_table(
-        reg, team_assign, ff_opportunity, schedules, snap_counts, rosters, ngs_receiving, pbp
+        reg, team_assign, ff_opportunity, schedules, snap_counts, rosters, ngs_receiving, pbp, ftn_charting
     )
 
     target = labels.filter((pl.col("position") == POSITION) & (~pl.col("is_rookie"))).select(
@@ -209,6 +211,7 @@ def load_and_build(
     ngs_receiving_path: Path = NGS_RECEIVING_PATH,
     coaching_changes_path: Path = sh.PATHS["coaching_changes"],
     pbp_path: Path = RAW_DIR / "pbp.parquet",
+    ftn_charting_path: Path = RAW_DIR / "ftn_charting.parquet",
     vegas_team_path: Path = PROCESSED_DIR / "vegas_team.parquet",
     out_path: Path = OUT_PATH,
 ) -> pl.DataFrame:
@@ -224,6 +227,7 @@ def load_and_build(
     ngs_receiving = pl.read_parquet(ngs_receiving_path) if ngs_receiving_path.exists() else None
     coaching_changes = sh.load_coaching_changes(coaching_changes_path)
     pbp = pl.read_parquet(pbp_path) if pbp_path.exists() else None
+    ftn_charting = pl.read_parquet(ftn_charting_path) if ftn_charting_path.exists() else None
     vegas_team = pl.read_parquet(vegas_team_path) if vegas_team_path.exists() else None
 
     out = build_features_te(
@@ -238,6 +242,7 @@ def load_and_build(
         ngs_receiving=ngs_receiving,
         coaching_changes=coaching_changes,
         pbp=pbp,
+        ftn_charting=ftn_charting,
         vegas_team=vegas_team,
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
