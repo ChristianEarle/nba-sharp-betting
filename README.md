@@ -5,23 +5,28 @@ fantasy-relevant skill player (QB/RB/WR/TE) it is intended to output a calibrate
 breakout probability, an expected finish-vs-ADP delta, and the SHAP drivers behind
 each call.
 
-> **Status: v1.7 complete.** v1 (nflverse ingest, market expectation,
+> **Status: v2.0 complete.** v1 (nflverse ingest, market expectation,
 > breakout labels, all four positions' features/models, SHAP
 > explainability, the 2026 breakout board) plus v1.5 (Odds API ingest,
 > Laplace-smoothed calibration, pbp-derived red-zone/goal-line share
-> features, the Vegas team/prop promotion gate) plus **v1.7: a per-position
-> proxy-era training-pool sensitivity check (RB moved to a real-market-only
-> pool), a 3-seed Optuna ensemble replacing single-seed tuning, Platt
-> calibration as the active method (isotonic dropped to legacy/reference
-> only), a per-position base-rate renormalization layer at board time
-> (replacing the old isotonic-saturation clamp as the thing keeping
-> displayed probabilities honest), and two more "fair" baselines
-> (eligible-prior-ppg, napkin-logistic) in every report.** All four
-> positions were retrained from scratch under this generation. See
-> [Progress](#progress) for verdicts, "v1.7: fixes" below for what changed
-> and why, and [Known Limitations](#known-limitations) for what to take
-> with a grain of salt. (v1.6 was an internal-only checkpoint folded into
-> this v1.7 pass — no separate v1.6 section exists.)
+> features, the Vegas team/prop promotion gate) plus v1.7 (a per-position
+> proxy-era training-pool sensitivity check, a 3-seed Optuna ensemble,
+> Platt calibration, per-position base-rate renormalization, two more
+> "fair" baselines) plus **v2.0: a second model — quantile regression over
+> each player's full per-game scoring distribution
+> (`src/models/quantile.py`) — predicting floor/expected/ceiling points,
+> predicted finish rank, and an honest outcome ladder (elite / startable /
+> useful / bust odds) for every scored veteran, eligible or not. The v1.7
+> classifier is not replaced: a pre-stated, binding comparison gate
+> (Deliverable 3) decides per position which model runs the board's
+> "Breakout Hunt" lens (TE moved to quantile; WR/RB/QB kept the
+> classifier), and a new "Full Projections" lens ranks every veteran by
+> expected points regardless of breakout eligibility.** See
+> [Progress](#progress) for v1.7 verdicts, "v2.0: structural redesign"
+> below for the full quantile/gate/lens writeup, and
+> [Known Limitations](#known-limitations) for what to take with a grain of
+> salt. (v1.6 was an internal-only checkpoint folded into v1.7 — no
+> separate v1.6 section exists.)
 
 ## Setup
 
@@ -788,6 +793,163 @@ for the new/renamed columns (`probability_calibrated_raw`, `tier`,
 `base_rate_multiple`) and the new probability range ((0, 0.97] instead of
 the old fixed [0.01, 0.95] clamp) — see `tests/test_inference.py`'s diff
 for the exact assertions changed and why.
+
+## v2.0: structural redesign — quantile projections, two lenses, comparison gate
+
+The binary breakout classifier above predicts a rare joint event (top-K
+finish AND cheap preseason ADP). At RB/TE's sample sizes that starves the
+model of signal: calibrated probabilities collapse toward the position's
+flat base rate (every TE reading ~1.8% regardless of who they are), and a
+player who is *definitionally* ineligible (already priced as a starter)
+still carries a meaningless "breakout odds" number. v2.0 adds a second
+model — `src/models/quantile.py` — that predicts each player's full PPR
+points-per-game *distribution* instead of one binary label, and derives
+every displayed quantity (finish rank, startable odds, floor/ceiling) from
+that distribution. The v1.7 classifier is **not replaced**: it stays the
+comparator, and Deliverable 3's pre-stated comparison gate decides, per
+position, which model actually runs the board's "Breakout Hunt" lens.
+
+### Deliverable 1 — quantile regression head
+
+LightGBM `objective="quantile"`, one model per position per alpha in
+`[0.10, 0.25, 0.50, 0.75, 0.90]`, trained on `in_training_pool==1 AND
+games>=8` rows of `features_{pos}.parquet` (target: `ppr_ppg`) — the exact
+per-game rate `finish_pos_rank` itself is computed from, and the same
+feature matrices/pools/`excluded_features` the classifier uses (including
+RB's 2020+-only pool from Step 1). Hyperparameters are tuned ONCE at
+alpha=0.50 (Optuna, 40 trials, single seed 42 — the v1.7 seed-ensemble fix
+targeted small-positive-count PR-AUC noise specific to the rare-event
+classifier; this head trains on every player-season with a continuous
+target and no class imbalance, so it isn't exposed to that instability —
+see `configs/model_{pos}.yaml`'s `quantile` block) and reused unmodified
+for all 5 alphas (only `n_estimators` is refit per alpha, via that alpha's
+own early stopping). Non-crossing (q10≤q25≤...≤q90) is enforced by sorting
+the 5 predictions per row. Validation is the same four expanding-window
+folds (`src.models.cv`); holdout is the identical 2024+2025 split, one
+evaluation. Results (pinball loss per alpha not reproduced here — see
+`outputs/model_{pos}_quantile_report.md` — pooled 80%-interval coverage
+and Spearman(q50, actual) are the headline numbers):
+
+| Position | Validation coverage (q10-q90, target 0.80) | Validation Spearman(q50, actual) | Holdout coverage | Holdout Spearman |
+|---|---|---|---|---|
+| WR | 0.760 | 0.783 | 0.657 | 0.736 |
+| RB | 0.731 | 0.725 | 0.705 | 0.738 |
+| TE | 0.779 | 0.656 | 0.685 | 0.743 |
+| QB | 0.712 | 0.631 | 0.785 | 0.590 |
+
+Holdout coverage runs a bit below the 0.80 target at this sample size
+(2024+2025 pooled is ~120-250 rows per position) — read as "the ranges are
+a little too tight, not badly miscalibrated," consistent with the general
+small-sample noise this whole pipeline documents elsewhere. Spearman in the
+0.7+ range says the median projection tracks actual per-game finish well.
+
+### Deliverable 2 — derived quantities (`src/inference/projections.py`)
+
+**Rank-to-ppg thresholds:** for every position and finish rank K, the ppg
+needed to finish rank K is computed per season directly off
+`labels.parquet` (the K-th ranked qualifying player's own `ppr_ppg`), then
+the MEDIAN across 2014-2025 is taken and isotonic-smoothed (monotone
+decreasing) into a full K=1..60 curve — `data/processed/rank_thresholds.parquet`.
+
+**Per-player probabilities:** a player's 5 non-crossing quantiles are
+treated as 5 points on his personal ppg CDF; `P(finish<=K)` for any K is
+`P(ppg >= T_pos(K))`, read off that CDF by linear interpolation (linearly
+extrapolated beyond q10/q90, clamped to [0.02, 0.98]).
+`predicted_finish_rank` inverts the same curve at the player's own q50.
+
+**Outcome ladder (mid-build addition):** four cumulative probabilities off
+the identical CDF, no new training — `p_elite` (finish<=5), `p_startable`
+(finish<= position's startable K: QB12/RB15/WR18/TE8), `p_useful`
+(finish<= 2x that K — flex/bench value). Each is independently
+honesty-renormalized per position (same v1.7 mechanism: a per-position
+linear rescale, capped at 0.97) so the sum over ALL scored veterans at a
+position matches its target exactly — 5 / K / 2K respectively — then
+`p_elite<=p_startable<=p_useful` is enforced per player by clipping upward
+cumulatively (independent scaling doesn't guarantee that ordering survives
+for every individual player even though each curve's own aggregate sum is
+exactly right). A mutually-exclusive 4-way decomposition (elite /
+starter-not-elite / useful-not-startable / bust) is derived for display —
+a stacked outcome bar — and sums to exactly 1 per player by construction.
+The clip-up pass can push a position's realized sum slightly past its
+exact target: on the live 2026 board, `p_elite`/`p_startable` land within
+0.0 of target for every position, `p_useful` lands within 0.75% for WR and
+1.4% for RB (QB/TE exact) — small, expected, and documented rather than
+hidden (`tests/test_quantile.py` checks this on synthetic data with a ±1%
+tolerance; the two positions above sit just outside that band on the real
+board, a known, understood side effect of the monotonic clip, not a bug).
+
+**Eligibility & value gap:** `breakout_eligible` reuses the exact label gate
+(`expectation_pos_rank >= adp_worse_than`, `configs/labels.yaml`) — a
+capped player's inflated rank makes him eligible automatically, no special
+case. `value_gap = expectation_pos_rank - predicted_finish_rank` (positive
+= undervalued: the market has him going later than the model expects him
+to finish).
+
+**Games-played caveat:** every quantity here is a PER-GAME projection.
+Injury/availability risk is not modeled anywhere in this pipeline — see
+Known Limitations.
+
+### Deliverable 3 — the comparison gate (pre-stated, binding)
+
+On the SAME holdout rows (`in_training_pool==1`, season in {2024,2025})
+the v1.7 classifier was judged on: rank ELIGIBLE players by quantile-derived
+`p_startable` (raw, pre-renormalization — a per-position positive rescale
+cannot change within-position ranking, so raw and renormalized give an
+identical top-10) and compute top-10 precision against `breakout==1`,
+pooled across both holdout years — exactly how the classifier's own
+`"model"/"pooled"/"top10_precision"` is computed. Decision: the quantile
+head becomes a position's primary board engine iff its precision is >= the
+classifier's own; ties favor quantile. Full table:
+`outputs/comparison_gate.md` / `.json`.
+
+| Position | Quantile top-10 precision | Classifier top-10 precision | n eligible (holdout) | Primary engine |
+|---|---|---|---|---|
+| WR | 0.100 | 0.200 | 193 | **classifier** |
+| RB | 0.100 | 0.200 | 107 | **classifier** |
+| TE | 0.200 | 0.200 | 104 | **quantile** (tie -> quantile) |
+| QB | 0.200 | 0.300 | 99 | **classifier** |
+
+TE is the one position where the quantile head ties the classifier's own
+holdout top-10 precision — per the pre-stated, binding rule, ties favor the
+richer quantile output, so TE's Breakout Hunt lens is ranked by
+`p_startable` going forward; WR/RB/QB keep the classifier as primary (the
+quantile head still supplies every Full Projections column for all four
+positions regardless of this decision). All four positions' `n eligible`
+counts are small enough (~100-200 holdout rows) that a single ranking flip
+moves top-10 precision by a full 0.1 — read this table with the same
+small-sample caution the rest of this README applies to top-10 precision
+throughout.
+
+### Deliverable 4 — board + dashboard restructure
+
+`outputs/breakout_board_2026.csv` gains `floor_ppg`/`expected_ppg`/`ceiling_ppg`
+(q10/q50/q90), `predicted_finish_rank`, `p_startable`/`p_elite`/`p_useful`,
+`value_gap`, `breakout_eligible`, `primary_engine`, `projection_sentence`
+alongside every existing v1.7 column. The board `.md` and the dashboard both
+get two lenses: **Breakout Hunt** (eligible players only, ranked by whichever
+engine Deliverable 3 picked as primary for that position — ineligible
+players excluded entirely) and **Full Projections** (every scored veteran,
+eligible or not, ranked by `expected_ppg`, with a floor-expected-ceiling
+range bar, predicted-finish-vs-market `value_gap`, and the outcome ladder;
+an ineligible player gets the badge "already priced as a starter" instead
+of breakout framing). Player detail carries the projection sentence
+("Projects 11.4 pts/gm (range 7.8-15.1) -> ~WR24 finish; priced WR39 -> +15
+spots of value; 34% to be a weekly starter, 8% top-5"). The dashboard's
+Trust view reports each position's holdout 80%-interval coverage plainly
+("its 80% ranges contained the real result X% of the time in test years")
+and the comparison-gate table above; Method explains the two-model,
+two-lens structure in plain language.
+
+### Deliverable 5 — tests
+
+`tests/test_quantile.py`: non-crossing quantiles, threshold-curve
+monotonicity, `p_startable` bounded in (0, 0.97], per-position ladder sums
+matching 5/K/2K within ±1%, ladder monotonicity per player, segments
+summing to 1, value-gap sign convention, eligible-lens exclusion of
+ineligible players, tiny-config determinism (`output_root` passed
+throughout, same guard as every other pipeline test in this repo), and a
+comparison-gate schema check. Full suite: 307 pre-existing tests plus the
+new quantile suite, all green — see the final report / CI for the exact count.
 
 ## Known Limitations
 

@@ -66,9 +66,11 @@ import polars as pl
 from src.dashboard.template import render_html
 from src.explain import shap_report as shp
 from src.inference import board_2026 as bd
+from src.inference import projections
 from src.ingest import adp
 from src.ingest.id_map import build_id_map, match_to_gsis
 from src.labels.build import load_labels_config
+from src.models import quantile as qmod
 from src.models import train
 
 REPO_ROOT = train.REPO_ROOT
@@ -167,6 +169,13 @@ def load_board() -> pd.DataFrame:
     df["is_rookie"] = df["section"] == "rookie (heuristic)"
     df["key"] = df["player_name"].astype(str) + "|" + df["pos"].astype(str)
     df["display_prob"] = np.where(df["is_rookie"], df["probability_heuristic"], df["probability"])
+    # v2.0: hunt_score is whichever engine Deliverable 3's comparison gate picked as
+    # primary for that position (classifier `probability` or quantile `p_startable`) --
+    # computed once here so the client never has to re-derive the gate decision itself.
+    if "primary_engine" in df.columns:
+        df["hunt_score"] = np.where(df["primary_engine"] == "quantile", df.get("p_startable"), df["probability"])
+    else:
+        df["hunt_score"] = df["probability"]
     return df
 
 
@@ -199,6 +208,27 @@ def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
                 "avail": r["availability"] if pd.notna(r["availability"]) else None,
                 "sat": bool(r["probability_saturated"]) if pd.notna(r["probability_saturated"]) else None,
                 "drift": drift,
+                # v2.0 quantile projections (Deliverable 4) -- null for a position with
+                # no quantile bundle yet, same "absent -> None" convention as every
+                # column above.
+                "hs": r["hunt_score"] if pd.notna(r.get("hunt_score")) else None,
+                "elig": bool(r["breakout_eligible"]) if pd.notna(r.get("breakout_eligible")) else None,
+                "eng": r["primary_engine"] if pd.notna(r.get("primary_engine")) else None,
+                "fppg": r["floor_ppg"] if pd.notna(r.get("floor_ppg")) else None,
+                "eppg": r["expected_ppg"] if pd.notna(r.get("expected_ppg")) else None,
+                "cppg": r["ceiling_ppg"] if pd.notna(r.get("ceiling_ppg")) else None,
+                "pfr": r["predicted_finish_rank"] if pd.notna(r.get("predicted_finish_rank")) else None,
+                "pel": r["p_elite"] if pd.notna(r.get("p_elite")) else None,
+                "pst": r["p_startable"] if pd.notna(r.get("p_startable")) else None,
+                "pus": r["p_useful"] if pd.notna(r.get("p_useful")) else None,
+                "seg": (
+                    [r["seg_elite"], r["seg_starter"], r["seg_useful"], r["seg_bust"]]
+                    if pd.notna(r.get("seg_elite"))
+                    else None
+                ),
+                "vg": r["value_gap"] if pd.notna(r.get("value_gap")) else None,
+                "aps": bool(r["already_priced_as_starter"]) if pd.notna(r.get("already_priced_as_starter")) else None,
+                "psent": r["projection_sentence"] if pd.notna(r.get("projection_sentence")) else None,
             }
         )
     return rows
@@ -461,12 +491,44 @@ def _metric_row(rows: list[dict], model: str, season) -> dict | None:
     return None
 
 
+def build_quantile_trust() -> dict:
+    """{pos: {holdout coverage/spearman/pinball_q50, gate decision}} -- v2.0's Deliverable-1
+
+    holdout metrics (``src.models.quantile``) plus Deliverable-3's comparison-gate decision
+    (``outputs/comparison_gate.json``, written by ``src.inference.projections.comparison_gate``),
+    read fresh here (never re-run) so the dashboard build stays fast and side-effect-free.
+    """
+    out = {}
+    gate_by_pos = {}
+    gate_path = projections.COMPARISON_GATE_JSON_PATH
+    if gate_path.exists():
+        for row in json.loads(gate_path.read_text()):
+            gate_by_pos[row["position"]] = row
+    for pos in POSITIONS:
+        qspec = qmod.quantile_spec(pos)
+        entry = {"coverage_q10_q90": None, "spearman_q50_actual": None, "pinball_q50": None, "gate": None}
+        if qspec.metrics_json_path.exists():
+            m = json.loads(qspec.metrics_json_path.read_text())["holdout_metrics"]
+            entry["coverage_q10_q90"] = m.get("coverage_q10_q90")
+            entry["spearman_q50_actual"] = m.get("spearman_q50_actual")
+            entry["pinball_q50"] = (m.get("pinball_by_alpha") or {}).get("0.50")
+        gate_row = gate_by_pos.get(pos.upper())
+        if gate_row:
+            entry["gate"] = {
+                "primary_engine": gate_row["primary_engine"],
+                "quantile_top10_precision": gate_row["quantile_top10_precision"],
+                "classifier_top10_precision": gate_row["classifier_top10_precision"],
+            }
+        out[pos] = entry
+    return out
+
+
 def build_trust_view() -> tuple[dict, dict]:
     """(trust_payload, report_dict) -- report_dict is for main()'s printed report,
 
     not embedded in the page.
     """
-    trust = {"positions": {}, "named_lists": {}}
+    trust = {"positions": {}, "named_lists": {}, "quantile": build_quantile_trust()}
     report = {}
     for pos in POSITIONS:
         spec = train.position_spec(pos)

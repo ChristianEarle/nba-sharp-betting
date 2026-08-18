@@ -119,6 +119,35 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
   .tier.t2 { border: 1.5px solid var(--line-strong); color: var(--muted); }
   .tier.t1 { color: var(--faint); }
 
+  /* ---- v2.0: lens toggle, outcome bar, range bar, ineligible badge ---- */
+  .lenstoggle { display: flex; gap: 4px; margin: 12px 0 0; }
+  .lenstab { font-family: 'Barlow Condensed', sans-serif; font-weight: 700; font-size: 13.5px; letter-spacing: .04em; text-transform: uppercase;
+    padding: 6px 13px 7px; border: 1.5px solid var(--line-strong); border-radius: 4px; background: var(--raised); color: var(--muted); cursor: pointer; }
+  .lenstab:hover { color: var(--ink); }
+  .lenstab[aria-selected="true"] { background: var(--accent); color: var(--tier-elite-ink); border-color: var(--accent); }
+  .lenstab:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+  .outcomebar { display: flex; height: 9px; gap: 2px; border-radius: 4px; overflow: hidden; background: var(--meter-track); }
+  .outcomebar span { display: block; height: 100%; }
+  .outcomebar .seg-elite { background: var(--accent); }
+  .outcomebar .seg-starter { background: var(--accent); opacity: .55; }
+  .outcomebar .seg-useful { background: var(--baseline-bar); }
+  .outcomebar .seg-bust { background: var(--meter-track); }
+  .ladder-words { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .ladder-words b { color: var(--ink); }
+
+  .rangebar-wrap { display: flex; align-items: center; gap: 9px; }
+  .rangebar { position: relative; flex: 1; height: 9px; background: var(--meter-track); border-radius: 4px; }
+  .rangebar .rb-range { position: absolute; top: 0; height: 100%; background: var(--accent); opacity: .35; border-radius: 4px; }
+  .rangebar .rb-dot { position: absolute; top: -2.5px; width: 5px; height: 14px; background: var(--accent); border-radius: 2px; transform: translateX(-2.5px); }
+  .rangebar-val { font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; width: 44px; text-align: right; }
+  .gap-cell { font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; text-align: right; white-space: nowrap; }
+  .gap-cell.pos { color: var(--pos); } .gap-cell.neg { color: var(--neg); }
+  .badge-priced { font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: 12px; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--faint); border: 1.5px solid var(--line-strong); border-radius: 3px; padding: 2px 8px 3px; white-space: nowrap; }
+  .coverage-stat { font-size: 13.5px; color: var(--muted); margin: 4px 0 14px; }
+  .coverage-stat b { color: var(--ink); }
+
   .detail { display: none; padding: 12px 10px 22px 52px; background: var(--surface); border-bottom: 1px solid var(--line); font-size: 13.5px; color: var(--muted); }
   li.open .detail { display: block; }
   .detail .say { max-width: 68ch; color: var(--ink); font-size: 14px; }
@@ -294,7 +323,13 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
     {id:"TE", label:"TE", rows: vets.filter(r=>r.p==="TE")},
     {id:"RK", label:"ROOKIES", rows: rooks},
   ];
-  let cur = "WR", query = "", sortKey = "pr", openKey = null;
+  // v2.0: two lenses. "hunt" = eligible players only, ranked by whichever engine
+  // Deliverable 3's comparison gate picked as primary for that position (r.hs, computed
+  // server-side -- src.dashboard.build.load_board). "full" = every scored veteran,
+  // eligible or not, ranked by expected ppg (r.eppg) with a floor-expected-ceiling range
+  // bar instead of a single meter. Rookies are unaffected by the lens (unchanged v1
+  // section) -- see README.
+  let cur = "WR", query = "", sortKey = "pr", openKey = null, lens = "hunt";
 
   const boardRoot = document.getElementById("viewBoard");
   boardRoot.innerHTML = `
@@ -306,7 +341,11 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       <div class="step"><span class="k">3 &middot; Check the news first</span>
         <p>This board <b>doesn't know about injuries</b>, suspensions, or holdouts. Thirty seconds of news-checking beats the math.</p></div>
     </div>
-    <p class="caveat"><b>What the percentage means:</b> the chance this cheap player finishes the season as a true weekly starter anyway (top-12 QB, top-15 RB, top-18 WR, top-8 TE). Each position's percentages are normalized so the total across everyone scored at that position matches how many breakouts actually happen there in a typical season &mdash; so a 25% WR and a 25% QB reflect the same kind of real base-rate comparison, not two calibration curves that happen to output the same number. The tier label below is a multiple of a random late pick's odds at that spot (see Verdict in "How to read this board") &mdash; even an Elite target won't hit every time.</p>
+    <p class="caveat"><b>What the percentage means:</b> the chance this cheap player finishes the season as a true weekly starter anyway (top-12 QB, top-15 RB, top-18 WR, top-8 TE). Each position's percentages are normalized so the total across everyone scored at that position matches how many breakouts actually happen there in a typical season &mdash; so a 25% WR and a 25% QB reflect the same kind of real base-rate comparison, not two calibration curves that happen to output the same number. The tier label below is a multiple of a random late pick's odds at that spot (see Verdict in "How to read this board") &mdash; even an Elite target won't hit every time. <b>Every row also has a projected per-game scoring range now</b> (tap to open) &mdash; switch to Full Projections below to browse by that instead of by breakout odds.</p>
+    <div class="lenstoggle" id="lensToggle" role="tablist" aria-label="Board lens">
+      <button class="lenstab" id="lens-hunt" role="tab">Breakout Hunt</button>
+      <button class="lenstab" id="lens-full" role="tab">Full Projections</button>
+    </div>
     <nav class="controls" aria-label="Board controls">
       <div class="tabs" role="tablist" id="tabs"></div>
       <input type="search" id="q" placeholder="Search player or team&hellip;" aria-label="Search player or team">
@@ -330,6 +369,8 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
         <div><b>The percentage</b>The model's calibrated odds he finishes as a weekly starter despite that cheap price, rescaled so each position's percentages add up to how many breakouts that position actually produces in a season. It's the only number you need on draft night.</div>
         <div><b>Verdict</b>That percentage as a multiple of a normal late pick's odds at his position: <b>Elite target</b> (8x or more), <b>Strong swing</b> (4&ndash;8x), <b>Worth a flier</b> (2&ndash;4x), <b>Long shot</b> (under 2x).</div>
         <div><b>Market ▲ / ▼</b>How his preseason ranking has moved across the summer's weekly consensus snapshots. ▲ = the market is warming up on him since June; ▼ = it's cooling.</div>
+        <div><b>Breakout Hunt vs Full Projections</b>Breakout Hunt only shows players who are still cheap enough to qualify as a breakout candidate at all, ranked by breakout odds. Full Projections shows every scored veteran, ranked by his projected per-game scoring, with a floor&ndash;expected&ndash;ceiling range bar and a "already priced as a starter" badge on anyone too expensive to be a breakout by definition.</div>
+        <div><b>Outcome bar (tap a row to see the words)</b>Four honest, non-overlapping shares of a player's season: top-5 finish, weekly-starter finish, still-useful bench/flex finish, and bust &mdash; they always add up to 100%.</div>
         <div><b>▲ and ▼ inside a row (tap to open)</b>Why the model thinks so. ▲ = a fact working in his favor (lots of catches last year, new team, cheap price). ▼ = a fact working against him.</div>
         <div><b>Numbers panel (inside a row)</b>Tap "Show the numbers" for the raw feature values and percentiles behind the call, plus the full market-drift chart &mdash; the detail underneath the plain-language verdict.</div>
       </div>
@@ -346,6 +387,8 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
   });
   document.getElementById("q").addEventListener("input", e => { query = e.target.value.trim().toLowerCase(); renderBoard(); });
   document.getElementById("sort").addEventListener("change", e => { sortKey = e.target.value; renderBoard(); });
+  document.getElementById("lens-hunt").addEventListener("click", () => { lens = "hunt"; openKey = null; renderBoard(); });
+  document.getElementById("lens-full").addEventListener("click", () => { lens = "full"; openKey = null; renderBoard(); });
 
   function driverChips(s, n) {
     return (s || "").split(", ").filter(Boolean).slice(0, n).map(tok => {
@@ -424,46 +467,125 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       (sentence ? '<div class="spark-note">' + sentence + "</div>" : "") + "</div>";
   }
 
+  // v2.0: the four-segment outcome bar -- elite / starter-not-elite / useful-not-
+  // startable / bust, mutually exclusive, always summing to 100% (server-computed,
+  // src.inference.projections.attach_ladder). ~9px tall, 2px gaps, per the mark spec.
+  function outcomeBarHTML(r) {
+    if (!r.seg) return "";
+    const [elite, starter, useful, bust] = r.seg;
+    const title = "Top-5: " + pct(r.pel) + " · Weekly starter: " + pct(r.pst) + " · Flex/bench value: " + pct(r.pus) + " · Bust: " + pct(1 - (r.pus ?? 0));
+    return '<div class="outcomebar" title="' + esc(title) + '" role="img" aria-label="' + esc(title) + '">' +
+      '<span class="seg-elite" style="width:' + Math.max(0, elite * 100) + '%"></span>' +
+      '<span class="seg-starter" style="width:' + Math.max(0, starter * 100) + '%"></span>' +
+      '<span class="seg-useful" style="width:' + Math.max(0, useful * 100) + '%"></span>' +
+      '<span class="seg-bust" style="width:' + Math.max(0, bust * 100) + '%"></span>' +
+      "</div>";
+  }
+  function ladderWordsHTML(r) {
+    if (r.pel == null) return "";
+    return '<div class="ladder-words"><b>Outcome ladder</b> (cumulative): top-5 season <b>' + pct(r.pel) +
+      '</b> &middot; weekly starter <b>' + pct(r.pst) + '</b> &middot; flex/bench value <b>' + pct(r.pus) +
+      '</b> &middot; bust <b>' + pct(1 - (r.pus ?? 0)) + "</b></div>";
+  }
+  function rangeBarHTML(r, lo, hi) {
+    // lo/hi are the shared position-wide axis bounds (min floor, max ceiling) so every
+    // row's bar is comparable at a glance.
+    const span = Math.max(1, hi - lo);
+    const left = Math.max(0, Math.min(100, 100 * (r.fppg - lo) / span));
+    const right = Math.max(0, Math.min(100, 100 * (r.cppg - lo) / span));
+    const dot = Math.max(0, Math.min(100, 100 * (r.eppg - lo) / span));
+    return '<div class="rangebar-wrap"><span class="rangebar" title="floor ' + r.fppg.toFixed(1) + ' – ceiling ' + r.cppg.toFixed(1) + ' pts/gm">' +
+      '<span class="rb-range" style="left:' + left + '%;width:' + Math.max(1, right - left) + '%"></span>' +
+      '<span class="rb-dot" style="left:' + dot + '%"></span>' +
+      '</span><span class="rangebar-val">' + r.eppg.toFixed(1) + '</span></div>';
+  }
+  function gapCellHTML(r) {
+    if (r.vg == null) return '<span class="gap-cell">&mdash;</span>';
+    const sign = r.vg > 0 ? "+" : "";
+    return '<span class="gap-cell ' + (r.vg > 0 ? "pos" : r.vg < 0 ? "neg" : "") + '">' + sign + Math.round(r.vg) + "</span>";
+  }
+  function projectionSentenceHTML(r) {
+    if (r.psent) return '<div class="say">' + esc(r.psent) + "</div>";
+    if (r.aps) return '<div class="say"><span class="badge-priced">Already priced as a starter</span> &mdash; the market already has him going inside his own position’s starter range, so "breakout odds" isn’t a meaningful frame for him.</div>';
+    return "";
+  }
+
   function renderBoard() {
     TABS.forEach(t => document.getElementById("tab-" + t.id).setAttribute("aria-selected", String(t.id === cur)));
     const tab = TABS.find(t => t.id === cur);
     document.getElementById("rookieNote").style.display = cur === "RK" ? "block" : "none";
+    const useFull = lens === "full" && cur !== "RK";
+    document.getElementById("lensToggle").style.display = cur === "RK" ? "none" : "flex";
+    document.getElementById("lens-hunt").setAttribute("aria-selected", String(lens === "hunt"));
+    document.getElementById("lens-full").setAttribute("aria-selected", String(lens === "full"));
+    document.getElementById("colhead").innerHTML = useFull
+      ? '<div class="num">#</div><div>Player</div><div>Value gap</div><div>Floor &ndash; expected &ndash; ceiling</div><div>Market</div><div>Note</div>'
+      : '<div class="num">#</div><div>Player</div><div>Draft cost</div><div>Chance he breaks out</div><div>Market</div><div>Verdict</div>';
+
     let rows = tab.rows.filter(r => !query || r.n.toLowerCase().includes(query) || (r.t || "").toLowerCase().includes(query));
-    let dir = (sortKey === "e" || sortKey === "a") ? 1 : -1;
-    rows = rows.slice().sort((x, y) => {
-      if (sortKey === "drift") {
-        const a = x.drift ? x.drift.drift : null, b = y.drift ? y.drift.drift : null;
-        if (a == null && b == null) return (y.pr ?? 0) - (x.pr ?? 0);
-        if (a == null) return 1; if (b == null) return -1;
-        return b - a;
+    if (cur !== "RK") {
+      if (useFull) {
+        rows = rows.filter(r => r.eppg != null);
+      } else {
+        // Breakout Hunt: eligible players only -- an ineligible player (already priced
+        // as a starter) is excluded from this lens entirely, not just deprioritized.
+        // A row with no quantile bundle yet (r.elig === null) falls back to showing
+        // (matches the pre-v2.0 board for that position).
+        rows = rows.filter(r => r.elig !== false);
       }
-      const a = x[sortKey], b = y[sortKey];
-      if (a == null && b == null) return (y.pr ?? 0) - (x.pr ?? 0);
-      if (a == null) return 1; if (b == null) return -1;
-      return dir * (a - b) || (y.rs ?? 0) - (x.rs ?? 0);
-    });
+    }
+
+    let dir = (sortKey === "e" || sortKey === "a") ? 1 : -1;
+    if (useFull) {
+      rows = rows.slice().sort((x, y) => (y.eppg ?? -Infinity) - (x.eppg ?? -Infinity));
+    } else {
+      rows = rows.slice().sort((x, y) => {
+        if (sortKey === "drift") {
+          const a = x.drift ? x.drift.drift : null, b = y.drift ? y.drift.drift : null;
+          if (a == null && b == null) return (hunt(y) ?? 0) - (hunt(x) ?? 0);
+          if (a == null) return 1; if (b == null) return -1;
+          return b - a;
+        }
+        const xk = sortKey === "pr" ? hunt(x) : x[sortKey], yk = sortKey === "pr" ? hunt(y) : y[sortKey];
+        if (xk == null && yk == null) return (hunt(y) ?? 0) - (hunt(x) ?? 0);
+        if (xk == null) return 1; if (yk == null) return -1;
+        return dir * (xk - yk) || (y.rs ?? 0) - (x.rs ?? 0);
+      });
+    }
+
+    const rangeLo = useFull ? Math.min(...rows.map(r => r.fppg).filter(v => v != null), 0) : 0;
+    const rangeHi = useFull ? Math.max(...rows.map(r => r.cppg).filter(v => v != null), 1) : 1;
     const maxP = cur === "RK" ? 1 : 0.7;
     const board = document.getElementById("board");
     board.innerHTML = rows.map((r, i) => {
       const key = r.key;
-      const p = r.pr == null ? 0 : Math.min(100, Math.round(100 * r.pr / maxP));
-      const shown = r.pr == null ? "—" : Math.round(r.pr * 100) + "%";
+      const huntVal = hunt(r);
+      const p = huntVal == null ? 0 : Math.min(100, Math.round(100 * huntVal / maxP));
+      const shown = huntVal == null ? "—" : Math.round(huntVal * 100) + "%";
       const tr = tier(r);
       const sub = [r.t, r.a ? "age " + Math.round(r.a) : null].filter(Boolean).join(" &middot; ");
       const profileHTML = featureProfileHTML(key);
       const sparkHTML = sparklineHTML(key);
+      const midCell = useFull
+        ? '<span class="meter">' + (r.eppg != null ? rangeBarHTML(r, rangeLo, rangeHi) : '<span class="rangebar-val">&mdash;</span>') + "</span>"
+        : '<span class="meter"><span class="track"><span class="fill" style="width:' + p + '%"></span></span><span class="val">' + shown + "</span></span>";
+      const col3 = useFull ? gapCellHTML(r) : '<span class="cost">' + costCell(r) + "</span>";
+      const col6 = useFull
+        ? (r.aps ? '<span class="badge-priced">Priced starter</span>' : '<span class="tier ' + tr.cls + '">' + tr.label + "</span>")
+        : '<span class="tier ' + tr.cls + '">' + tr.label + "</span>";
       return '<li' + (openKey === key ? ' class="open"' : "") + '>' +
         '<button class="row" data-k="' + esc(key) + '" aria-expanded="' + (openKey === key) + '">' +
           '<span class="rank">' + (i + 1) + "</span>" +
           '<span class="who"><span class="nm">' + esc(r.n) + '</span><span class="sub">' + sub + "</span></span>" +
-          '<span class="cost">' + costCell(r) + "</span>" +
-          '<span class="meter"><span class="track"><span class="fill" style="width:' + p + '%"></span></span>' +
-            '<span class="val">' + shown + "</span></span>" +
+          col3 +
+          midCell +
           driftCell(r) +
-          '<span class="tier ' + tr.cls + '">' + tr.label + "</span>" +
+          col6 +
         "</button>" +
         '<div class="detail">' +
-          '<div class="say">' + (r.r ? esc(r.r) : esc(r.n) + " — no notes recorded.") + "</div>" +
+          projectionSentenceHTML(r) +
+          (r.r ? '<div class="say">' + esc(r.r) + "</div>" : (!r.psent && !r.aps ? '<div class="say">' + esc(r.n) + " — no notes recorded.</div>" : "")) +
+          (r.seg ? outcomeBarHTML(r) : "") + (r.seg ? ladderWordsHTML(r) : "") +
           (r.s ? '<div class="why"><span class="lbl">What&rsquo;s driving the call</span>' + driverChips(r.s, 9) + "</div>" : "") +
           (!r.rk && r.d != null ? '<div class="also"><span class="lbl">Second opinion</span>A separate model predicts his finish vs his price: ' +
             (r.d > 2 ? "beats his price by ~" + Math.round(r.d) + " spots — the two models agree." :
@@ -480,6 +602,11 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       openKey = openKey === b.dataset.k ? null : b.dataset.k; renderBoard();
     }));
   }
+  // Whichever engine Deliverable 3's comparison gate picked as primary for a row's
+  // position (r.hs, server-computed) -- falls back to r.pr (the legacy display
+  // probability) for a position with no quantile bundle yet, or for rookies (r.hs is
+  // never set on rookie rows).
+  function hunt(r) { return r.hs != null ? r.hs : r.pr; }
   renderBoard();
 
   // ======================================================== POSITIONS VIEW
@@ -547,6 +674,32 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
     chartRows.map(r => '<tr><td>' + r.pos + '</td><td class="mono">' + r.m.toFixed(3) + '</td><td>' + esc(r.t.best_baseline_name || "—") + '</td><td class="mono">' + r.b.toFixed(3) + '</td></tr>').join("") +
     '</tbody></table></div>';
 
+    // v2.0: the quantile head's holdout track record (coverage of its 80% ranges,
+    // Spearman rank correlation) and Deliverable 3's comparison-gate decision per
+    // position -- TRUST.quantile, built by src.dashboard.build.build_quantile_trust.
+    const qt = TRUST.quantile || {};
+    const anyQuantile = POS_ORDER.some(p => qt[p.toLowerCase()] && qt[p.toLowerCase()].coverage_q10_q90 != null);
+    if (anyQuantile) {
+      html += '<h2 style="font-family:\'Barlow Condensed\',sans-serif;font-size:19px;margin:28px 0 4px;">The projection ranges (v2.0)</h2>' +
+        '<p class="vsub" style="margin-bottom:4px;">Every player also gets a floor&ndash;expected&ndash;ceiling range (his 10th, 50th and 90th percentile per-game score). A well-calibrated 80% range should contain the real result about 80% of the time in years the model never trained on.</p>';
+      POS_ORDER.forEach(pos => {
+        const t = qt[pos.toLowerCase()];
+        if (!t || t.coverage_q10_q90 == null) return;
+        html += '<div class="coverage-stat"><b>' + pos + ':</b> its 80% ranges contained the real result <b>' + Math.round(t.coverage_q10_q90 * 100) +
+          '%</b> of the time in the 2024&ndash;2025 test years' + (t.spearman_q50_actual != null ? ' (rank correlation of its median projection to actual finish: <b>' + t.spearman_q50_actual.toFixed(2) + '</b>)' : '') + '.</div>';
+      });
+      const gateRows = POS_ORDER.map(p => qt[p.toLowerCase()] && qt[p.toLowerCase()].gate ? {pos: p, g: qt[p.toLowerCase()].gate} : null).filter(Boolean);
+      if (gateRows.length) {
+        html += '<h3 style="font-family:\'Barlow Condensed\',sans-serif;font-size:15px;margin:18px 0 6px;">Which engine runs Breakout Hunt at each position</h3>' +
+          '<p class="vsub" style="margin-bottom:8px;">Pre-stated rule: the projection model becomes the primary engine for a position iff its top-10 precision (ranking eligible players by startable odds) is at least as good as the older breakout-odds model\'s, on the identical 2024&ndash;2025 holdout rows. Ties favor the projection model.</p>' +
+          '<div class="vtable"><table><thead><tr><th>Position</th><th>Projection-model top-10 precision</th><th>Older-model top-10 precision</th><th>Primary engine</th></tr></thead><tbody>' +
+          gateRows.map(r => '<tr><td>' + r.pos + '</td><td class="mono">' + (r.g.quantile_top10_precision != null ? r.g.quantile_top10_precision.toFixed(3) : '—') +
+            '</td><td class="mono">' + (r.g.classifier_top10_precision != null ? r.g.classifier_top10_precision.toFixed(3) : '—') +
+            '</td><td><b>' + esc(r.g.primary_engine) + '</b></td></tr>').join("") +
+          '</tbody></table></div>';
+      }
+    }
+
     html += '<h2 style="font-family:\'Barlow Condensed\',sans-serif;font-size:19px;margin:28px 0 4px;">Named holdout top-10 lists, 2024 &amp; 2025</h2>' +
       '<p class="vsub" style="margin-bottom:8px;">The model’s actual top-10 cheap-price picks each holdout year, and whether each one really broke out. ✓ = hit.</p>';
     POS_ORDER.forEach(pos => {
@@ -593,11 +746,14 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       '<p>It starts as a <b>calibrated</b> probability (Platt scaling on the seed-ensemble score, v1.7) — among every player the model has ever said "25%" about, roughly 1 in 4 actually broke out. Then it gets <b>renormalized per position</b>: nothing about a calibration curve forces a position\'s probabilities to sum to how many breakouts that position actually produces in a season, so each position is rescaled so they do (see the README\'s v1.7 section). The league-wide base rate for a random cheap/late player is about 3–6% (QB highest, WR/TE thinnest — see the Positions view for the real number at each spot); a tier label is that player\'s displayed percentage as a multiple of his own position\'s base rate this year, not a fixed cutoff.</p>' +
       '<h2>What it trains on</h2>' +
       '<p>Only information that existed <b>before</b> the season started: the player’s own prior-season usage and efficiency, his team’s situation (new coach, new offensive coordinator, teammates who left and freed up targets/carries), his draft pedigree, and the market’s own preseason consensus rank. Every feature is built with a strict N-1 shift — nothing from the season being predicted ever leaks into the inputs used to predict it. That is the one rule the whole pipeline is built around.</p>' +
+      '<h2>Two models, two lenses (v2.0)</h2>' +
+      '<p>This board runs <b>two different models</b> side by side, because they answer different questions well. The older model (above) directly predicts one rare event — "will this cheap player finish as a starter" — which works fine for QB but starves RB/TE of real signal: at those sample sizes its calibrated odds for a whole position can collapse toward a flat number that barely distinguishes one player from another. The newer model instead predicts each player’s full <b>range</b> of likely per-game scoring (a floor, an expected value, and a ceiling), and every other number on the page — his predicted finish, his odds of being a starter, a flex play, or a bust — is read straight off that one range, for every player, whether he is cheap enough to be a "breakout" or not. Neither model throws the other away: <b>Breakout Hunt</b> ranks only the cheap-enough-to-qualify players, by whichever of the two models actually tests better at that position (see Trust); <b>Full Projections</b> ranks every scored veteran by the newer model’s expected points, breakout-eligible or not, with the full range shown as a bar. A player already priced as a starter never appears in Breakout Hunt — the newer model still shows where he\'s projected to finish, just without the breakout framing that wouldn\'t make sense for him.</p>' +
       '<h2>What it does NOT know</h2>' +
       '<ul>' +
       '<li><b>Injuries, holdouts, suspensions.</b> The manual availability screen this board reads from is empty by design — nobody can responsibly guess next month’s injury report from here. Check the news yourself before you draft anyone on this page.</li>' +
       '<li><b>Anything after the snapshot date</b> shown in the header (the last weekly market-consensus pull this build used).</li>' +
       '<li><b>This year’s actual games.</b> Obviously — none have been played yet.</li>' +
+      '<li><b>Who plays how many games.</b> Every projection on this page is a PER-GAME rate — a player projected for 14 points a game who only plays 8 of them is not the same fantasy asset as one who plays 17, and nothing here tells the two apart. Games-played / injury risk is not modeled anywhere in this pipeline.</li>' +
       '</ul>' +
       '<h2>Vegas lines: tested, not used</h2>' +
       '<p>Team-level Vegas win totals and implied scoring were tried as model inputs, twice, across all four positions. Neither pass improved holdout accuracy enough to justify keeping — the market’s own preseason draft price already contains most of what the betting lines would have added. The board still shows Vegas implied points where available, purely as a manual sanity-check column, never as a model input.</p>' +

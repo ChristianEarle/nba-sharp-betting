@@ -112,3 +112,28 @@ baselines:
     age_threshold: 25 # bonus applies when age <= this
     year_in_league_bonus: 10
     year_in_league_eligible: [1, 2]
+
+# v2.0 quantile regression head (src/models/quantile.py). Predicts the full
+# ppr_ppg distribution (5 quantiles) instead of a binary breakout label --
+# see that module's docstring for the full rationale. Hyperparameters are
+# tuned ONCE, at alpha=0.50, and reused unmodified (except n_estimators,
+# refit per alpha via that alpha's own early stopping) for all 5 alphas --
+# per-alpha Optuna re-tuning was judged not worth 5x the compute for a
+# quantile head that just needs "reasonable tree shape," not a knife's-edge
+# PR-AUC optimum the way the rare-event classifier does.
+#
+# Single seed (42), no seed ensemble: the v1.7 seed-ensemble fix targeted
+# small-sample PR-AUC noise on a 3-6% positive rate (a handful of positives
+# flipping a fold's ranking) -- that instability is specific to the rare-
+# event classifier. Quantile regression here trains on ALL player-seasons
+# (games>=8, in_training_pool==1) with a continuous target and no class
+# imbalance at all, so a single deterministic run is not exposed to the same
+# small-positive-count noise; re-litigating that with a 3-seed ensemble
+# would just be spending compute without addressing an actual instability.
+quantile:
+  alphas: [0.10, 0.25, 0.50, 0.75, 0.90]
+  tune_alpha: 0.50
+  seed: 42
+  optuna:
+    trials: 40 # Optuna trials for the alpha=0.50 tuning pass only
+    tiny_trials: 5 # tests/test_quantile.py

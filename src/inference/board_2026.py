@@ -102,6 +102,25 @@ v1 are kept as belt-and-suspenders, now expected to be no-ops:
 - ``raw_score`` (the pre-calibration blended classifier score) is still
   kept as the secondary sort key, in case a future recalibration
   reintroduces ties.
+
+v2.0: quantile projections + two lenses
+------------------------------------------
+Alongside the v1.7 classifier scoring above, every position with a saved
+``{pos}_quantile_bundle.joblib`` (``src.models.quantile``) is also scored
+for its full ppg distribution; ``src.inference.projections`` turns that into
+``floor_ppg``/``expected_ppg``/``ceiling_ppg`` (q10/q50/q90),
+``predicted_finish_rank``, the outcome ladder (``p_elite``/``p_startable``/
+``p_useful``, honesty-renormalized the same way ``probability`` already is),
+``value_gap``, and ``breakout_eligible``. Neither model is replaced by the
+other -- ``src.inference.projections.load_engine_decision`` (Deliverable 3's
+pre-stated comparison gate) says, per position, whether the "Breakout hunt"
+lens ranks by the classifier's ``probability`` or the quantile head's
+``p_startable``; the "Full projections" lens (ALL veterans, ranked by
+``expected_ppg``) is the same regardless of that decision, since it isn't a
+breakout-odds ranking at all. A position with no quantile bundle yet
+degrades gracefully: its quantile-derived columns are null and its
+"Breakout hunt" lens keeps ranking by the classifier's probability, exactly
+the v1.7 board.
 """
 
 from __future__ import annotations
@@ -120,8 +139,10 @@ from src.features import rb as feat_rb
 from src.features import shared as sh
 from src.features import te as feat_te
 from src.features import wr as feat_wr
+from src.inference import projections as pj
 from src.ingest.id_map import build_id_map, match_to_gsis, normalize_name
-from src.labels.build import PLAYER_STATS_PATH, add_expectation, load_scoring_config
+from src.labels.build import PLAYER_STATS_PATH, add_expectation, load_labels_config, load_scoring_config
+from src.models import quantile as qmod
 from src.models import rookie_heuristic as rh
 from src.models import train
 
@@ -697,8 +718,16 @@ def attach_overlay(board: pd.DataFrame, crosswalk: pl.DataFrame) -> pd.DataFrame
 # --------------------------------------------------------------------------
 
 
+_PROJECTION_COLS = [
+    "gsis_id", "floor_ppg", "expected_ppg", "ceiling_ppg", "predicted_finish_rank",
+    "p_elite_raw", "p_startable_raw", "p_useful_raw", "value_gap", "startable_k", "useful_k",
+]
+
+
 def build_veteran_board() -> pd.DataFrame:
     raw = load_raw_frames()
+    labels_cfg = load_labels_config()
+    thresholds = pj.load_or_build_thresholds()
     rows = []
     for pos in train.POSITIONS:
         spec = train.position_spec(pos)
@@ -715,6 +744,27 @@ def build_veteran_board() -> pd.DataFrame:
         scored["rationale"] = [
             build_rationale(pos, scored.iloc[i], scored.iloc[i]["_shap_top_features"]) for i in range(len(scored))
         ]
+
+        # v2.0: breakout_eligible is computed directly here (not only via the quantile
+        # projections module) so it is populated even for a position with no quantile
+        # bundle yet -- same eligibility gate src.labels.build applies (expectation_pos_rank
+        # >= adp_worse_than; a capped player's inflated rank makes them eligible
+        # automatically, no special case).
+        adp_worse_than = float(labels_cfg["thresholds"][spec.label_position]["adp_worse_than"])
+        scored["breakout_eligible"] = scored["expectation_pos_rank"] >= adp_worse_than
+
+        qspec = qmod.quantile_spec(pos)
+        if qspec.artifact_path.exists():
+            qbundle = joblib.load(qspec.artifact_path)
+            qscored = qmod.score_quantiles(qbundle, df)
+            proj = pj.compute_projections_for_position(qscored, spec.label_position, thresholds, labels_cfg)
+            scored = scored.merge(proj[_PROJECTION_COLS], on="gsis_id", how="left")
+        else:
+            print(f"  {pos}: no quantile bundle at {qspec.artifact_path}, quantile columns left null")
+            for c in _PROJECTION_COLS:
+                if c != "gsis_id":
+                    scored[c] = np.nan
+
         rows.append(scored)
         print(f"  {pos}: scored {len(scored)} veterans")
     if not rows:
@@ -725,7 +775,42 @@ def build_veteran_board() -> pd.DataFrame:
     # inside the per-position loop above. See attach_renormalized_probability's docstring.
     mean_breakouts = historical_mean_breakouts_by_position()
     combined = attach_renormalized_probability(combined, mean_breakouts)
+    # v2.0: outcome-ladder honesty renormalization (p_elite/p_startable/p_useful),
+    # needs every position's rows on hand at once -- same shape as the classifier's own
+    # renormalization above. Rows with no quantile bundle (p_*_raw all NaN) get NaN
+    # ladder columns out of attach_ladder (NaN.sum() over an all-NaN slice is 0, so that
+    # position's scale would divide by zero -- guarded inside attach_ladder's
+    # `total > 0` check, which NaN also fails, falling back to scale=1.0 harmlessly).
+    combined = pj.attach_ladder(combined, pos_col="pos")
+    engine_decision = pj.load_engine_decision()
+    combined["primary_engine"] = combined["pos"].map(engine_decision).fillna("classifier")
+    combined["projection_sentence"] = [
+        build_projection_sentence(combined.iloc[i]) for i in range(len(combined))
+    ]
+    combined["already_priced_as_starter"] = ~combined["breakout_eligible"].astype("boolean")
     return combined
+
+
+def build_projection_sentence(row: pd.Series) -> str | float:
+    """"Projects 11.4 pts/gm (range 7.8-15.1) -> ~WR24 finish; priced WR39 -> +15 spots of
+
+    value; 34% to be a weekly starter, 8% top-5" -- the plain-language echo of every
+    quantile-derived column on one player-detail line. Returns NaN (not a string) when
+    the quantile columns are null (no bundle for that position yet), matching every
+    other quantile-derived column's null-when-absent convention.
+    """
+    if pd.isna(row.get("expected_ppg")):
+        return np.nan
+    pos = row["pos"]
+    gap = row.get("value_gap")
+    gap_str = f"+{gap:.0f} spots of value" if pd.notna(gap) and gap > 0 else (f"{gap:.0f} spots below market" if pd.notna(gap) else "n/a")
+    market_rank = row.get("expectation_pos_rank")
+    market_str = f"priced {pos}{int(market_rank)}" if pd.notna(market_rank) else "unpriced"
+    return (
+        f"Projects {row['expected_ppg']:.1f} pts/gm (range {row['floor_ppg']:.1f}-{row['ceiling_ppg']:.1f}) "
+        f"-> ~{pos}{int(round(row['predicted_finish_rank']))} finish; {market_str} -> {gap_str}; "
+        f"{row['p_startable']*100:.0f}% to be a weekly starter, {row['p_elite']*100:.0f}% top-5"
+    )
 
 
 def build_rookie_board() -> pd.DataFrame:
@@ -773,6 +858,12 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         "tier", "base_rate_multiple", "base_rate", "probability_saturated",
         "expected_rank_delta", "consensus_pos_rank", "adp", "sleeper_adp_pos_rank", "adp_gap",
         "implied_pts", "edge", "availability", "shap_top3", "rationale",
+        # v2.0 quantile-derived columns (Deliverable 4) -- null for a position with no
+        # quantile bundle yet, same convention as every other optional overlay column above.
+        "floor_ppg", "expected_ppg", "ceiling_ppg", "predicted_finish_rank",
+        "p_startable", "p_elite", "p_useful", "value_gap", "breakout_eligible",
+        "primary_engine", "projection_sentence", "already_priced_as_starter",
+        "seg_elite", "seg_starter", "seg_useful", "seg_bust",
     ]
     v = veteran_board.copy()
     if not v.empty:
@@ -817,7 +908,66 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         "at that position this year) — Elite target (8x+), Strong swing (4-8x), Worth a flier (2-4x), Long shot (under 2x)."
     )
     lines.append("")
-    lines.append("## Veterans")
+    lines.append(
+        "> **v2.0 (two lenses):** every veteran also carries a quantile-regression projection "
+        "(`floor_ppg`/`expected_ppg`/`ceiling_ppg` = q10/q50/q90 of his predicted ppr-ppg distribution, "
+        "`predicted_finish_rank`, and the outcome ladder `p_elite`/`p_startable`/`p_useful` -- see README's v2.0 "
+        "section). **Breakout Hunt** below ranks only `breakout_eligible` players (the same eligibility gate "
+        "`src.labels.build` uses to define a breakout at all) by whichever engine Deliverable 3's comparison gate "
+        "picked as primary for that position (`primary_engine` column -- classifier `probability` or quantile "
+        "`p_startable`); **Full Projections** ranks EVERY scored veteran by `expected_ppg`, eligible or not. "
+        "Neither lens replaces the other; both read off the same underlying columns."
+    )
+    lines.append("")
+    lines.append("## Breakout Hunt")
+    lines.append("")
+    lines.append("Eligible players only (already-priced starters are excluded from this lens entirely).")
+    lines.append("")
+    for pos in ("QB", "RB", "WR", "TE"):
+        sub = v_out[(v_out["pos"] == pos) & (v_out["breakout_eligible"] == True)]  # noqa: E712
+        if sub.empty:
+            continue
+        engine = sub["primary_engine"].iloc[0] if pd.notna(sub["primary_engine"].iloc[0]) else "classifier"
+        sort_col = "p_startable" if engine == "quantile" else "probability"
+        sub = sub.sort_values(sort_col, ascending=False, na_position="last")
+        lines.append(f"### {pos} — primary engine: **{engine}**")
+        lines.append("")
+        headers = ["Player", "Team", "Probability", "P(startable)", "P(elite)", "P(useful)", "Tier", "Predicted finish", "Consensus (ECR)", "Value gap", "Availability"]
+        rows = [
+            [
+                row["player_name"], row["team"], row["probability"], row["p_startable"], row["p_elite"], row["p_useful"],
+                row["tier"], row["predicted_finish_rank"], row["consensus_ecr_pos_rank"], row["value_gap"], row["availability"],
+            ]
+            for _, row in sub.iterrows()
+        ]
+        lines.append(_markdown_table(headers, rows))
+        lines.append("")
+
+    lines.append("## Full Projections")
+    lines.append("")
+    lines.append("Every scored veteran, eligible or not, ranked by expected ppg (q50).")
+    lines.append("")
+    for pos in ("QB", "RB", "WR", "TE"):
+        sub = v_out[(v_out["pos"] == pos) & v_out["expected_ppg"].notna()]
+        if sub.empty:
+            continue
+        sub = sub.sort_values("expected_ppg", ascending=False)
+        lines.append(f"### {pos}")
+        lines.append("")
+        headers = ["Player", "Team", "Floor", "Expected", "Ceiling", "Predicted finish", "Consensus (ECR)", "Value gap", "P(startable)", "P(elite)", "P(useful)", "Badge"]
+        rows = [
+            [
+                row["player_name"], row["team"], row["floor_ppg"], row["expected_ppg"], row["ceiling_ppg"],
+                row["predicted_finish_rank"], row["consensus_ecr_pos_rank"], row["value_gap"],
+                row["p_startable"], row["p_elite"], row["p_useful"],
+                "already priced as a starter" if row["already_priced_as_starter"] else "",
+            ]
+            for _, row in sub.iterrows()
+        ]
+        lines.append(_markdown_table(headers, rows))
+        lines.append("")
+
+    lines.append("## Veterans (full detail)")
     lines.append("")
     for pos in ("QB", "RB", "WR", "TE"):
         sub = v_out[v_out["pos"] == pos]
@@ -828,7 +978,8 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         headers = [
             "Player", "Age", "Team", "Probability", "Tier", "Base-rate x", "Raw calibrated", "Raw score",
             "Exp. rank Δ", "Consensus (ECR)", "Sleeper ADP", "ADP gap", "Vegas implied", "Edge", "Availability",
-            "Top drivers", "Rationale",
+            "Top drivers", "Rationale", "Floor", "Expected", "Ceiling", "Predicted finish",
+            "P(startable)", "P(elite)", "P(useful)", "Value gap", "Eligible", "Primary engine", "Projection sentence",
         ]
         rows = [
             [
@@ -836,6 +987,9 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
                 row["base_rate_multiple"], row["probability_calibrated_raw"], row["raw_score"],
                 row["expected_rank_delta"], row["consensus_ecr_pos_rank"], row["sleeper_adp_pos_rank"],
                 row["adp_gap"], row["implied_pts"], row["edge"], row["availability"], row["shap_top3"], row["rationale"],
+                row["floor_ppg"], row["expected_ppg"], row["ceiling_ppg"], row["predicted_finish_rank"],
+                row["p_startable"], row["p_elite"], row["p_useful"], row["value_gap"], row["breakout_eligible"],
+                row["primary_engine"], row["projection_sentence"],
             ]
             for _, row in sub.iterrows()
         ]
