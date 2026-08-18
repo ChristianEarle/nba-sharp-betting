@@ -266,6 +266,11 @@ def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
                 "fppg": r["floor_ppg"] if pd.notna(r.get("floor_ppg")) else None,
                 "eppg": r["expected_ppg"] if pd.notna(r.get("expected_ppg")) else None,
                 "cppg": r["ceiling_ppg"] if pd.notna(r.get("ceiling_ppg")) else None,
+                # v2.3: cohort_rank (this year's field, "Projects PosN of 2026" -- the new
+                # headline rank) vs predicted_finish_rank (a typical season with this q50,
+                # historically -- unchanged) -- see src.inference.projections' "Two ranks,
+                # not one" docstring section.
+                "cr": r["cohort_rank"] if pd.notna(r.get("cohort_rank")) else None,
                 "pfr": r["predicted_finish_rank"] if pd.notna(r.get("predicted_finish_rank")) else None,
                 "pel": r["p_elite"] if pd.notna(r.get("p_elite")) else None,
                 "pst": r["p_startable"] if pd.notna(r.get("p_startable")) else None,
@@ -275,7 +280,16 @@ def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
                     if pd.notna(r.get("seg_elite"))
                     else None
                 ),
-                "vg": r["value_gap"] if pd.notna(r.get("value_gap")) else None,
+                # v2.3: the displayed/colored "Value gap" column is value_gap_typical
+                # (predicted_finish_rank-based) -- the holdout audit's metric-decision run
+                # (src.audit.holdout_board_audit.value_gap_metric_comparison) found the new
+                # cohort-based value_gap grades WORSE as a realized-outcome sorter, so the
+                # headline rank display changed (cr, above) but the validated sort/color
+                # metric did not. `vgc` (cohort-based) is kept alongside for anyone reading
+                # the raw row data, e.g. via the board CSV. See outputs/holdout_board_audit.md's
+                # "Metric decision" subsection and README for the full reasoning.
+                "vg": r["value_gap_typical"] if pd.notna(r.get("value_gap_typical")) else None,
+                "vgc": r["value_gap"] if pd.notna(r.get("value_gap")) else None,
                 "aps": bool(r["already_priced_as_starter"]) if pd.notna(r.get("already_priced_as_starter")) else None,
                 "psent": r["projection_sentence"] if pd.notna(r.get("projection_sentence")) else None,
             }

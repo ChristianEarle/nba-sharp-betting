@@ -890,7 +890,9 @@ board, a known, understood side effect of the monotonic clip, not a bug).
 capped player's inflated rank makes him eligible automatically, no special
 case. `value_gap = expectation_pos_rank - predicted_finish_rank` (positive
 = undervalued: the market has him going later than the model expects him
-to finish).
+to finish). **Superseded by v2.3, below:** this formula is now `value_gap_typical`;
+`value_gap` itself was redefined against a different, comparable-population rank
+(`cohort_rank`) — see the "v2.3" section for why and what changed.
 
 **Games-played caveat:** every quantity here is a PER-GAME projection.
 Injury/availability risk is not modeled anywhere in this pipeline — see
@@ -1175,6 +1177,104 @@ mismatch. See the final report for whether Deliverable 2's gate promoted
 any position (which would require a real retrain at frozen
 hyperparameters) and, if not, confirmation that no production retrain
 was needed beyond the regenerated features feeding the existing bundles.
+
+## v2.3: `cohort_rank` / `value_gap` fix — two ranks, not one
+
+**The problem (found via the holdout board audit above).** `predicted_finish_rank`
+maps a player's q50 onto the HISTORICAL points-to-rank threshold curve (the median
+2014-2025 rank-K ppg, isotonic-smoothed). Because a median projection regresses
+toward the pack, that curve maps nearly every elite player to something like rank
+8-12: Jahmyr Gibbs — 15.7 ppg median, the #1 projected RB for 2026 — mapped to
+"~RB10", because the historical RB1's median ppg (24.5) is an extreme order
+statistic no single median projection can reach. `value_gap = expectation_pos_rank
+- predicted_finish_rank` inherited this: every top-priced player at every position
+read a systematically NEGATIVE value_gap, because a market rank near 1 was being
+diffed against a typical-year rank near 10 — the two ranks were never comparable
+populations to begin with.
+
+**The fix.** `src/inference/projections.py` adds `cohort_rank`: a player's 1-based
+rank among his position's own scored population THIS YEAR (2026, or an audited
+historical season), by `expected_ppg` descending, ties broken by `ceiling_ppg` then
+raw `q75` — a deterministic permutation of 1..N. This is the rank that belongs next
+to the market's own ECR rank, since ECR ranks roughly the same population.
+`predicted_finish_rank` (the typical-year mapping) is kept unchanged alongside it —
+see `projections.py`'s "Two ranks, not one" docstring section. `value_gap` now uses
+`cohort_rank` (`= expectation_pos_rank - cohort_rank`); the old metric is kept,
+unrenamed in meaning, as `value_gap_typical`.
+
+**Before / after (2026 board, live bundles):**
+
+| Player | Pos | Old `value_gap` (typical-year) | `cohort_rank` | New `value_gap` (cohort) | Priced |
+|---|---|---|---|---|---|
+| Jahmyr Gibbs | RB1 | -9.2 (read as overpriced) | 1 | 0.0 | RB1 |
+| De'Von Achane | RB2 | -2.3 | 2 | +6.0 | RB8 |
+| Ja'Marr Chase | WR1 | -4.7 | 1 | 0.0 | WR1 |
+| Josh Allen | QB1 | -4.7 | 1 | 0.0 | QB1 |
+| Trey McBride | TE1 | -3.8 | 1 | 0.0 | TE1 |
+
+The old metric flagged the #1 projected player at every position as "overpriced" —
+not because the model disagreed with the market, but because it was comparing his
+market rank to the wrong reference curve. The new `cohort_rank`-based gap reads ~0
+for these players (correctly: the market has them right where the model does) and
+recovers real positive gaps for players the market has going noticeably later than
+this year's field ranks them (Achane +6.0, Bo Nix +10.0 at QB, Jaxson Dart +8.0).
+
+**Board/dashboard changes:** the projection sentence now headlines the cohort rank
+("Projects RB1 of 2026 (15.7 pts/gm, range 12.4-20.4); a season like his median
+projection historically finishes ~RB10; priced RB1 -> +0 spots of value; ..."). The
+board CSV gains `cohort_rank` and `value_gap_typical` alongside the redefined
+`value_gap`; the `.md` tables and dashboard show a **Projects (2026)** column
+(`cohort_rank`) next to **Typical finish** (`predicted_finish_rank`), and both value
+gaps side by side where there's room.
+
+**Audit re-grading — does the new metric validate?** The original holdout audit
+(`src/audit/holdout_board_audit.py`, seasons 2024+2025 pooled) graded `value_gap` in
+terciles and found the top tercile beat its preseason price far more often than the
+bottom tercile — the audit's headline "the value_gap signal is real" finding. Because
+`value_gap`'s formula changed, that grade needed re-running on BOTH versions before
+trusting either as validated. `value_gap_metric_comparison` now grades both, pooled,
+on the identical population:
+
+| Metric | Bottom tercile beats price | Middle tercile | Top tercile beats price | Spread (top − bottom) |
+|---|---|---|---|---|
+| `value_gap_typical` (predicted_finish_rank-based, pre-v2.3) | 44.6% | 44.3% | 77.8% | **+33.2pt** |
+| `value_gap` (cohort_rank-based, v2.3) | 45.3% | 47.7% | 75.3% | **+30.0pt** |
+
+**Decision (measured, not assumed): `typical` wins.** The cohort-based gap grades
+slightly WORSE as a realized-outcome sorter than the metric this audit originally
+validated (a ~3pt smaller top-vs-bottom spread). Per the pre-stated rule this session
+followed: a metric that grades worse does not get promoted just because its
+underlying rank is more intuitive to read. So:
+
+- The **headline display change stands on its own merits** — `cohort_rank` /
+  "Projects PosN of 2026" fixes a real conflation (comparing a market rank to the
+  wrong reference curve) and is not itself a ranking claim, so it ships regardless.
+- The **`Value gap` column and coloring keep using `value_gap_typical`** (the
+  validated sorter) as the board's default, with the new cohort-based gap shown
+  alongside as `value_gap` / **"Value gap (cohort)"** for transparency — a
+  presentational relabeling of the headline rank, not a claim that the new gap is a
+  better signal. `src/inference/board_2026.py`'s table-generation code and
+  `src/dashboard/build.py`'s `board_rows` (`vg` = `value_gap_typical`, `vgc` =
+  `value_gap`) both implement this split explicitly, with comments pointing back to
+  this decision.
+- Full reasoning and both tercile tables are also written to
+  `outputs/holdout_board_audit.md`'s "Metric decision" subsection
+  (`src.audit.holdout_board_audit.value_gap_metric_comparison`), regenerated on every
+  audit run — this is not a one-time hand check.
+
+**Tests:** `tests/test_quantile.py` adds `cohort_rank` permutation coverage (every
+rank 1..N appears exactly once within a position), the cohort-based `value_gap` sign
+convention, and the Gibbs-style motivating case (the single highest-`expected_ppg`
+player in a synthetic population gets `cohort_rank == 1` even though his
+`predicted_finish_rank` reads much worse, reproducing the exact conflation this fix
+resolves). The pre-existing sign-convention test is renamed
+`test_value_gap_typical_sign_convention` (same assertions, new name, since it tests
+the renamed metric). `tests/test_audit.py` adds a `value_gap_terciles` check on the
+`value_gap_typical` metric, a structural check on
+`value_gap_metric_comparison`'s decision object, and a determinism check (two
+independent re-grades of the same frozen holdout board produce identical spreads and
+tercile tables) — matching this repo's existing "scoring a frozen bundle is a pure
+function call" determinism guarantee for everything else in the audit.
 
 ## Known Limitations
 

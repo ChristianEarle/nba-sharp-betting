@@ -410,25 +410,78 @@ def draft_value_breakout_hunt(board: pd.DataFrame, top_n: int = 10) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
-def value_gap_terciles(board: pd.DataFrame) -> pd.DataFrame:
+def value_gap_terciles(board: pd.DataFrame, metric_col: str = "value_gap") -> pd.DataFrame:
     """Full-Projections' value_gap, in terciles (pooled across positions within the
 
     board passed in): did positive-gap (model says undervalued) players beat their
-    price more often, and by how much, than negative-gap players?
+    price more often, and by how much, than negative-gap players? ``metric_col`` lets
+    the same grading logic run against either ``value_gap`` (cohort_rank-based, the
+    display default as of v2.3) or ``value_gap_typical`` (predicted_finish_rank-based,
+    the metric this audit originally validated pre-v2.3) -- see
+    ``value_gap_metric_comparison`` below, which runs both and reports which one grades
+    better on realized outcomes.
     """
-    df = board[board["value_gap"].notna() & board["expectation_pos_rank"].notna()].copy()
+    df = board[board[metric_col].notna() & board["expectation_pos_rank"].notna()].copy()
     if df.empty:
         return pd.DataFrame()
-    df["tercile"] = pd.qcut(df["value_gap"], q=3, labels=["bottom (model says overpriced)", "middle", "top (model says undervalued)"])
+    df["tercile"] = pd.qcut(df[metric_col], q=3, labels=["bottom (model says overpriced)", "middle", "top (model says undervalued)"])
     finish = _finish_or_bust(df["finish_pos_rank"])
     df["beat_price"] = finish < df["expectation_pos_rank"]
     df["finish_vs_price"] = df["expectation_pos_rank"] - finish
     out = (
         df.groupby("tercile", observed=True)
-        .agg(n=("value_gap", "size"), mean_value_gap=("value_gap", "mean"), beat_price_rate=("beat_price", "mean"), avg_finish_vs_price=("finish_vs_price", "mean"))
+        .agg(n=(metric_col, "size"), mean_value_gap=(metric_col, "mean"), beat_price_rate=("beat_price", "mean"), avg_finish_vs_price=("finish_vs_price", "mean"))
         .reset_index()
     )
     return out
+
+
+def value_gap_metric_comparison(pooled: pd.DataFrame) -> dict:
+    """Grades BOTH value-gap metrics (cohort_rank-based ``value_gap`` vs
+
+    predicted_finish_rank-based ``value_gap_typical``) on the identical pooled
+    2024+2025 population and picks a winner by tercile SEPARATION -- top-tercile
+    beat_price_rate minus bottom-tercile beat_price_rate, the same "did the top tercile
+    actually beat the market more often than the bottom tercile" question the original
+    (pre-v2.3) audit asked of value_gap. Larger separation = a more useful sort (bigger
+    gap between "model says undervalued" and "model says overpriced" players' real
+    outcomes). Ties keep the pre-v2.3 validated metric (value_gap_typical) as the
+    default sort, since it already has a track record and a tie is not evidence the
+    new metric is better. Returns the two tercile tables plus the decision and the
+    numbers behind it, so the report/README can show the reasoning, not just the
+    conclusion.
+    """
+    cohort = value_gap_terciles(pooled, "value_gap")
+    typical = value_gap_terciles(pooled, "value_gap_typical")
+
+    def _spread(t: pd.DataFrame) -> float:
+        if t.empty or len(t) < 3:
+            return float("nan")
+        return float(t.iloc[-1]["beat_price_rate"] - t.iloc[0]["beat_price_rate"])
+
+    cohort_spread = _spread(cohort)
+    typical_spread = _spread(typical)
+    if np.isnan(cohort_spread) and np.isnan(typical_spread):
+        winner = "neither (insufficient data)"
+    elif np.isnan(cohort_spread):
+        winner = "typical"
+    elif np.isnan(typical_spread):
+        winner = "cohort"
+    else:
+        winner = "cohort" if cohort_spread > typical_spread else "typical"
+    return {
+        "cohort_terciles": cohort,
+        "typical_terciles": typical,
+        "cohort_spread": cohort_spread,
+        "typical_spread": typical_spread,
+        "winner": winner,
+        # The board's Full-Projections lens itself is ALWAYS sorted by expected_ppg
+        # (never by value_gap -- see src.inference.board_2026's module docstring), so
+        # this decision governs which metric is the board's displayed/colored
+        # `value_gap` default and which sorter the DRAFT-VALUE-style analyses should
+        # prefer, not the lens's own row order.
+        "recommended_default_value_gap_metric": "cohort_rank-based (value_gap)" if winner == "cohort" else "predicted_finish_rank-based (value_gap_typical)",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -585,8 +638,14 @@ def build_audit(seasons: tuple[int, ...] = AUDIT_SEASONS) -> dict:
 
     draft_value_pooled = draft_value_breakout_hunt(pooled)
     draft_value_by_season = {s: draft_value_breakout_hunt(b) for s, b in boards.items() if not b.empty}
-    value_gap_pooled = value_gap_terciles(pooled)
-    value_gap_by_season = {s: value_gap_terciles(b) for s, b in boards.items() if not b.empty}
+    # value_gap here means the CURRENT board default (cohort_rank-based, v2.3+) --
+    # kept for backward compatibility with anything that reads this key. The full
+    # both-metrics comparison (cohort vs the pre-v2.3 predicted_finish_rank-based
+    # value_gap_typical) is value_gap_metric_comparison, pooled-only (a per-season
+    # winner isn't meaningful at this sample size -- see the report).
+    value_gap_pooled = value_gap_terciles(pooled, "value_gap")
+    value_gap_by_season = {s: value_gap_terciles(b, "value_gap") for s, b in boards.items() if not b.empty}
+    value_gap_metric_cmp = value_gap_metric_comparison(pooled)
 
     receipts_by_season = {s: named_receipts(b) for s, b in boards.items() if not b.empty}
     autopsy_by_season = {s: failure_autopsy(b) for s, b in boards.items() if not b.empty}
@@ -610,6 +669,7 @@ def build_audit(seasons: tuple[int, ...] = AUDIT_SEASONS) -> dict:
         "draft_value_by_season": draft_value_by_season,
         "value_gap_pooled": value_gap_pooled,
         "value_gap_by_season": value_gap_by_season,
+        "value_gap_metric_cmp": value_gap_metric_cmp,
         "receipts_by_season": receipts_by_season,
         "autopsy_by_season": autopsy_by_season,
         "threshold_deltas": threshold_deltas,
@@ -625,9 +685,12 @@ def _verdict(a: dict) -> str:
     adp_startable = int(adp_rows["delivered_startable_seasons"].sum())
     model_n = int(model_rows["n"].sum())
     adp_n = int(adp_rows["n"].sum())
-    vg = a["value_gap_pooled"]
-    top_rate = float(vg.iloc[-1]["beat_price_rate"]) if not vg.empty else float("nan")
-    bot_rate = float(vg.iloc[0]["beat_price_rate"]) if not vg.empty else float("nan")
+    cmp = a["value_gap_metric_cmp"]
+    cohort_t, typical_t = cmp["cohort_terciles"], cmp["typical_terciles"]
+    cohort_top = float(cohort_t.iloc[-1]["beat_price_rate"]) if not cohort_t.empty else float("nan")
+    cohort_bot = float(cohort_t.iloc[0]["beat_price_rate"]) if not cohort_t.empty else float("nan")
+    typical_top = float(typical_t.iloc[-1]["beat_price_rate"]) if not typical_t.empty else float("nan")
+    typical_bot = float(typical_t.iloc[0]["beat_price_rate"]) if not typical_t.empty else float("nan")
     flags = []
     for name, cal in a["ladder_pooled"].items():
         col = {"p_startable": "realized_startable", "p_elite": "realized_elite", "p_useful": "realized_useful"}[name]
@@ -637,9 +700,15 @@ def _verdict(a: dict) -> str:
         f"Across both holdout seasons (2024+2025, {model_n} Breakout Hunt top-10-per-position picks pooled), the "
         f"model's own top-10 picks delivered {model_startable}/{model_n} startable seasons vs {adp_startable}/{adp_n} "
         f"for simply taking the market's own ADP order within the same cheap-eligible pool -- {'a real edge' if model_startable > adp_startable else ('no better than the market order' if model_startable == adp_startable else 'WORSE than just following ADP order')}. "
-        f"The Full-Projections value_gap signal is more convincing: players in the top value-gap tercile beat their preseason "
-        f"price {top_rate*100:.0f}% of the time vs {bot_rate*100:.0f}% for the bottom tercile -- that ordering direction is real "
-        f"even where the headline Breakout-Hunt pick list is not obviously better than ADP. Ladder calibration: {flag_txt}. "
+        f"The Full-Projections value_gap signal is more convincing either way, but the two available versions of it don't grade "
+        f"identically: the pre-v2.3 predicted_finish_rank-based gap (`value_gap_typical`) shows top tercile {typical_top*100:.0f}% "
+        f"vs bottom tercile {typical_bot*100:.0f}% beating their preseason price ({(typical_top-typical_bot)*100:+.0f}pt spread); "
+        f"the v2.3 cohort_rank-based gap (`value_gap`, now the board's display default) shows top {cohort_top*100:.0f}% vs bottom "
+        f"{cohort_bot*100:.0f}% ({(cohort_top-cohort_bot)*100:+.0f}pt spread). Decision (per this run): **{cmp['winner']}** grades "
+        f"as the stronger sorter, so **{cmp['recommended_default_value_gap_metric']}** is this audit's recommended default for "
+        "ranking/sorting by value gap -- see the 'Metric decision' subsection below for the full reasoning; the board still "
+        "DISPLAYS cohort_rank as the headline rank regardless (a presentational change, kept separate from which metric is the "
+        f"validated sorter). Ladder calibration: {flag_txt}. "
         "Range honesty and per-position detail are below; read the flagged buckets and the failure autopsy before trusting any "
         "single displayed percentage on the 2026 board."
     )
@@ -714,15 +783,57 @@ def write_report(a: dict, report_path: Path = REPORT_PATH) -> None:
 
     lines.append("### Full Projections value_gap terciles: did undervalued (positive-gap) players beat their price more?")
     lines.append("")
+    lines.append(
+        "v2.3 added a second, cohort_rank-based value_gap alongside the original predicted_finish_rank-based one "
+        "(now `value_gap_typical`) -- see `src.inference.projections`' \"Two ranks, not one\" docstring section. "
+        "Both are graded here, pooled 2024+2025, on the identical population."
+    )
+    lines.append("")
+    lines.append("**value_gap (cohort_rank-based -- current board display default):**")
+    lines.append("")
     lines.append(_md_table(a["value_gap_pooled"], pct_cols=("beat_price_rate",)))
+    lines.append("")
+    lines.append("**value_gap_typical (predicted_finish_rank-based -- the metric originally validated by this audit):**")
+    lines.append("")
+    lines.append(_md_table(a["value_gap_metric_cmp"]["typical_terciles"], pct_cols=("beat_price_rate",)))
     lines.append("")
     for s in a["seasons"]:
         if s not in a["value_gap_by_season"]:
             continue
-        lines.append(f"**Season {s}:**")
+        lines.append(f"**Season {s} (cohort_rank-based):**")
         lines.append("")
         lines.append(_md_table(a["value_gap_by_season"][s], pct_cols=("beat_price_rate",)))
         lines.append("")
+
+    lines.append("#### Metric decision: which value_gap should be the validated sorter?")
+    lines.append("")
+    cmp = a["value_gap_metric_cmp"]
+    cs, ts = cmp["cohort_spread"], cmp["typical_spread"]
+    cs_txt = f"{cs*100:+.1f}pt" if pd.notna(cs) else "n/a"
+    ts_txt = f"{ts*100:+.1f}pt" if pd.notna(ts) else "n/a"
+    lines.append(
+        f"Top-tercile-minus-bottom-tercile beat-price-rate spread (pooled 2024+2025): cohort_rank-based value_gap = "
+        f"{cs_txt}, predicted_finish_rank-based value_gap_typical = {ts_txt}. **Winner: {cmp['winner']}** -- "
+        f"recommended default sorter: **{cmp['recommended_default_value_gap_metric']}**."
+    )
+    lines.append("")
+    if cmp["winner"] == "cohort":
+        lines.append(
+            "The cohort-based gap grades at least as well as the metric this audit originally validated, so the display "
+            "change (headlining `cohort_rank` / `value_gap`) is treated as validated, not merely presentational: it is both "
+            "the more intuitive number (comparable to a market rank) AND the stronger realized-outcome sorter."
+        )
+    else:
+        lines.append(
+            "The cohort-based gap grades WORSE than the metric this audit originally validated. Per the pre-stated decision "
+            "rule: the headline DISPLAY change (showing `cohort_rank` as \"Projects PosN of 2026\" instead of the typical-year "
+            "mapping) stands on its own merits -- it fixes a real conflation (see `src.inference.projections`' \"Two ranks, "
+            "not one\" section) and is not itself a ranking claim. But `value_gap` sorting/coloring and any downstream "
+            "\"undervalued\" analysis should keep using `value_gap_typical` (the predicted_finish_rank-based metric) as the "
+            "validated sorter until a future audit shows otherwise -- this is a presentational relabeling of the rank shown, "
+            "not a claim that the new gap is a better signal."
+        )
+    lines.append("")
 
     lines.append("## 4. Named receipts (top Breakout Hunt picks vs what happened)")
     lines.append("")
@@ -803,6 +914,14 @@ def write_metrics_json(a: dict, metrics_path: Path = METRICS_JSON_PATH) -> None:
         "draft_value_by_season": {str(s): _df_records(v) for s, v in a["draft_value_by_season"].items()},
         "value_gap_pooled": _df_records(a["value_gap_pooled"]),
         "value_gap_by_season": {str(s): _df_records(v) for s, v in a["value_gap_by_season"].items()},
+        "value_gap_metric_comparison": {
+            "cohort_terciles": _df_records(a["value_gap_metric_cmp"]["cohort_terciles"]),
+            "typical_terciles": _df_records(a["value_gap_metric_cmp"]["typical_terciles"]),
+            "cohort_spread": a["value_gap_metric_cmp"]["cohort_spread"],
+            "typical_spread": a["value_gap_metric_cmp"]["typical_spread"],
+            "winner": a["value_gap_metric_cmp"]["winner"],
+            "recommended_default_value_gap_metric": a["value_gap_metric_cmp"]["recommended_default_value_gap_metric"],
+        },
         "receipts_by_season": {str(s): _df_records(v) for s, v in a["receipts_by_season"].items()},
         "autopsy_by_season": {
             str(s): {k: _df_records(v) for k, v in d.items()} for s, d in a["autopsy_by_season"].items()

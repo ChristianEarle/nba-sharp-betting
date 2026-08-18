@@ -157,10 +157,12 @@ def test_p_startable_bounded() -> None:
     assert (proj["p_startable_raw"] <= pj.CDF_HI).all()
 
 
-def test_value_gap_sign_convention() -> None:
+def test_value_gap_typical_sign_convention() -> None:
     """A player drafted much later (high expectation_pos_rank) than his predicted finish
 
-    (low predicted_finish_rank) should have a POSITIVE value_gap (undervalued).
+    (low predicted_finish_rank) should have a POSITIVE value_gap_typical (undervalued
+    against the historical typical-year mapping) -- this is the pre-v2.3 metric,
+    renamed but otherwise unchanged in meaning.
     """
     thresholds = _synthetic_thresholds()
     cfg = {"thresholds": {"WR": {"finish_top": 18, "adp_worse_than": 31}}}
@@ -169,7 +171,79 @@ def test_value_gap_sign_convention() -> None:
     # q50=18 is near the top of this curve (K=1's threshold is ~21.4) -> predicted
     # finish rank should be small, well below the 45 he was drafted at.
     assert proj["predicted_finish_rank"].iloc[0] < proj["expectation_pos_rank"].iloc[0]
-    assert proj["value_gap"].iloc[0] > 0
+    assert proj["value_gap_typical"].iloc[0] > 0
+
+
+def test_value_gap_cohort_sign_convention() -> None:
+    """A player drafted much later (high expectation_pos_rank) than he ranks within his
+
+    OWN scored cohort (low cohort_rank) should have a POSITIVE value_gap (v2.3's
+    cohort-based metric -- see src.inference.projections' "Two ranks, not one" section).
+    """
+    thresholds = _synthetic_thresholds()
+    cfg = {"thresholds": {"WR": {"finish_top": 18, "adp_worse_than": 31}}}
+    # Three players: the target player (q50=18, the top scorer in this tiny cohort) plus
+    # two lower-scoring teammates, so cohort_rank has something to rank against.
+    scored = pd.DataFrame(
+        {
+            "q10": [14.0, 8.0, 6.0],
+            "q25": [16.0, 10.0, 8.0],
+            "q50": [18.0, 12.0, 9.0],
+            "q75": [19.0, 13.0, 10.0],
+            "q90": [20.0, 14.0, 11.0],
+            "expectation_pos_rank": [45.0, 5.0, 20.0],
+        }
+    )
+    proj = pj.compute_projections_for_position(scored, "WR", thresholds, cfg)
+    target = proj.iloc[0]
+    assert target["cohort_rank"] == 1  # highest expected_ppg in this cohort
+    assert target["value_gap"] > 0  # drafted 45th but ranks 1st in his own cohort -- undervalued
+    assert target["value_gap"] == target["expectation_pos_rank"] - target["cohort_rank"]
+
+
+def test_cohort_rank_is_permutation_within_position(synthetic_projected) -> None:
+    """cohort_rank must be a bijection 1..N onto the scored population passed in -- every
+
+    rank appears exactly once, no gaps, no duplicates (see cohort_rank's docstring).
+    """
+    df = synthetic_projected
+    n = len(df)
+    ranks = sorted(df["cohort_rank"].tolist())
+    assert ranks == list(range(1, n + 1))
+
+
+def test_gibbs_style_top_projected_player_gets_cohort_rank_one() -> None:
+    """The motivating case: a player with the single highest expected_ppg in his
+
+    position's scored population must get cohort_rank == 1 even though his q50 maps to
+    a much worse predicted_finish_rank on the historical typical-year curve (a median
+    projection cannot reach a historical RB1's extreme order-statistic threshold -- see
+    module docstring). This is the exact conflation the v2.3 fix separates: the OLD
+    value_gap (predicted_finish_rank-based) read negative for this player despite him
+    being priced (and now correctly displayed) as the #1 player at his position.
+    """
+    thresholds = _synthetic_thresholds()
+    cfg = {"thresholds": {"WR": {"finish_top": 18, "adp_worse_than": 31}}}
+    rng = np.random.default_rng(7)
+    n = 60
+    # A realistic median-regressed population: everyone's q50 sits well below the
+    # curve's K=1 threshold (~21.4), the way real median projections do -- this is what
+    # makes predicted_finish_rank read as "~WR10" instead of "~WR1" for the top player.
+    q50 = np.sort(rng.uniform(3.0, 15.7, n))[::-1]
+    q50[0] = 15.7  # the top-projected player, well below the historical WR1 threshold
+    scored = pd.DataFrame(
+        {
+            "q10": q50 - 3.0, "q25": q50 - 1.5, "q50": q50, "q75": q50 + 1.5, "q90": q50 + 3.0,
+            "expectation_pos_rank": np.arange(1, n + 1, dtype=float),  # player 0 is also priced WR1
+        }
+    )
+    proj = pj.compute_projections_for_position(scored, "WR", thresholds, cfg)
+    top = proj.iloc[0]
+    assert top["cohort_rank"] == 1
+    assert top["predicted_finish_rank"] > 1  # the typical-year mapping reads worse than WR1
+    assert top["value_gap"] == top["expectation_pos_rank"] - 1  # priced WR1, cohort_rank 1 -> ~0
+    # The old metric would have read negative here (predicted_finish_rank > 1, priced 1st):
+    assert top["value_gap_typical"] < top["value_gap"]
 
 
 def test_eligible_lens_excludes_ineligible_players(synthetic_projected) -> None:

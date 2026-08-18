@@ -202,6 +202,48 @@ def test_value_gap_terciles_ordering_columns_present(board_2024) -> None:
     assert vg["mean_value_gap"].is_monotonic_increasing
 
 
+def test_value_gap_terciles_typical_metric(board_2024) -> None:
+    """value_gap_terciles(metric_col="value_gap_typical") must grade the pre-v2.3
+
+    metric on the identical population/logic -- same shape, same ordering guarantee.
+    """
+    vg = aud.value_gap_terciles(board_2024, "value_gap_typical")
+    assert not vg.empty
+    assert len(vg) == 3
+    assert vg["mean_value_gap"].is_monotonic_increasing
+
+
+def test_value_gap_metric_comparison_structure(board_2024) -> None:
+    """value_gap_metric_comparison must grade both metrics on the same pooled board and
+
+    return a decision drawn from exactly the two candidates (or the documented
+    insufficient-data fallback).
+    """
+    cmp = aud.value_gap_metric_comparison(board_2024)
+    assert set(cmp) == {
+        "cohort_terciles", "typical_terciles", "cohort_spread", "typical_spread",
+        "winner", "recommended_default_value_gap_metric",
+    }
+    assert not cmp["cohort_terciles"].empty
+    assert not cmp["typical_terciles"].empty
+    assert cmp["winner"] in {"cohort", "typical", "neither (insufficient data)"}
+
+
+def test_value_gap_metric_comparison_is_deterministic(board_2024) -> None:
+    """Scoring frozen bundles is a pure function call (see
+
+    test_build_season_board_is_deterministic) -- the metric-comparison decision built
+    on top of it must therefore be identical across two independent runs.
+    """
+    cmp1 = aud.value_gap_metric_comparison(board_2024)
+    cmp2 = aud.value_gap_metric_comparison(board_2024)
+    assert cmp1["winner"] == cmp2["winner"]
+    assert cmp1["cohort_spread"] == cmp2["cohort_spread"] or (pd.isna(cmp1["cohort_spread"]) and pd.isna(cmp2["cohort_spread"]))
+    assert cmp1["typical_spread"] == cmp2["typical_spread"] or (pd.isna(cmp1["typical_spread"]) and pd.isna(cmp2["typical_spread"]))
+    pd.testing.assert_frame_equal(cmp1["cohort_terciles"], cmp2["cohort_terciles"])
+    pd.testing.assert_frame_equal(cmp1["typical_terciles"], cmp2["typical_terciles"])
+
+
 def test_named_receipts_only_eligible_players(board_2024) -> None:
     receipts = aud.named_receipts(board_2024, top_n=5)
     assert not receipts.empty
@@ -254,12 +296,15 @@ def test_report_and_metrics_written_with_required_sections(tmp_path) -> None:
     for header in REQUIRED_REPORT_HEADERS:
         assert header in text, f"missing section: {header}"
     assert "2024" in text and "2025" in text
+    assert "Metric decision" in text
+    assert "value_gap_typical" in text
 
     assert metrics_path.exists()
     payload = json.loads(metrics_path.read_text())
     assert payload["seasons"] == [2024, 2025]
-    for key in ("ladder_pooled", "range_honesty_pooled", "draft_value_pooled", "value_gap_pooled", "threshold_deltas", "breakout_deltas"):
+    for key in ("ladder_pooled", "range_honesty_pooled", "draft_value_pooled", "value_gap_pooled", "value_gap_metric_comparison", "threshold_deltas", "breakout_deltas"):
         assert key in payload
+    assert payload["value_gap_metric_comparison"]["winner"] in {"cohort", "typical", "neither (insufficient data)"}
 
 
 def test_report_does_not_touch_production_outputs(tmp_path) -> None:

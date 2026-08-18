@@ -67,15 +67,42 @@ any curve's aggregate target is still hit to the decimal after the clip -- verif
 stay within +/-1% in practice (tests/test_quantile.py) because violations are rare and
 small.
 
+Two ranks, not one (cohort_rank vs predicted_finish_rank)
+-------------------------------------------------------------
+A player's median (q50) projection answers two DIFFERENT questions depending what
+you compare it to, and this module keeps both instead of conflating them:
+
+- ``cohort_rank``: where this player's expected_ppg stacks up against every OTHER
+  player scored at his position THIS YEAR (2026, or an audited historical season) --
+  ties broken by ceiling_ppg then raw q75, a deterministic 1..N permutation within
+  the position. This is the rank that belongs next to the market's own ECR rank,
+  because ECR ranks roughly the same population.
+- ``predicted_finish_rank``: where a TYPICAL season with this player's own q50 would
+  have finished, historically (the inverse of the median 2014-2025 points-to-rank
+  threshold curve -- see "Rank-to-ppg thresholds" above). Because a median projection
+  regresses toward the pack, this curve maps nearly every elite player to something
+  like rank 8-12 -- a historical RB1's median ppg is an extreme order statistic no
+  single median projection reaches, so "this year's #1 projected RB" and "a typical
+  RB1 season" are simply different reference points, not a contradiction.
+
+Both are real, both are kept on the board (see README / the board's projection
+sentence), and neither is a rename of the other.
+
 Eligibility & value gap
 --------------------------
 ``breakout_eligible`` reuses the exact label-eligibility gate
 (``configs/labels.yaml``'s ``adp_worse_than``, per position) -- a player capped one slot
 behind the deepest market signal (``adp_source == "capped"``) gets a large
 ``expectation_pos_rank`` and therefore counts as eligible automatically, no special case
-needed. ``value_gap = expectation_pos_rank - predicted_finish_rank``; positive means the
-market has him going LATER (worse rank number) than the model expects him to finish
-(better rank number) -- undervalued.
+needed.
+
+``value_gap = expectation_pos_rank - cohort_rank`` (the display default) -- both sides
+now rank comparable universes (the market's ECR ranks roughly this same scored cohort),
+so positive means the market has him going LATER (worse rank number) than he stacks up
+against this year's field (better rank number) -- undervalued. ``value_gap_typical =
+expectation_pos_rank - predicted_finish_rank`` is kept alongside for continuity with the
+pre-fix metric (it was the one graded by ``src.audit.holdout_board_audit``'s original
+tercile test; see that module for how both versions grade against realized outcomes).
 
 Games-played caveat
 ----------------------
@@ -200,6 +227,39 @@ def predicted_finish_rank(q50: np.ndarray, position: str, lookup: dict) -> np.nd
     return np.clip(np.interp(q50, thr_asc, k_desc), 1.0, float(MAX_K))
 
 
+def cohort_rank(expected_ppg: np.ndarray, ceiling_ppg: np.ndarray, q75: np.ndarray) -> np.ndarray:
+    """1-based rank among THIS SAME SCORED POPULATION (a position's scored 2026 --
+
+    or, in the audit, an audited season's -- veterans), by ``expected_ppg`` (q50)
+    descending, ties broken by ``ceiling_ppg`` (q90) then raw ``q75`` descending, both
+    deterministic. This is a different question from ``predicted_finish_rank`` above:
+    ``predicted_finish_rank`` maps a player's own q50 onto the HISTORICAL points-to-
+    finish-rank threshold curve (median across 2014-2025 seasons) -- because a median
+    projection regresses toward the pack, that curve maps nearly every top player to
+    something like rank 8-12, since the curve's rank-1 threshold is set by a historical
+    RB1's median ppg (an extreme order statistic no single median projection reaches).
+    ``cohort_rank`` instead just asks "of the players actually scored this year at his
+    position, how many project higher than him" -- the same universe the market's own
+    ECR ranks, so it is the rank that belongs on the LEFT of a market-comparison gap
+    (see ``value_gap`` below). A permutation of 1..N within the population passed in;
+    ties are broken deterministically so the same input always produces the same
+    output, but which of two exactly-tied players gets the lower number is otherwise
+    arbitrary (stable on input row order).
+    """
+    n = len(expected_ppg)
+    expected_ppg = np.asarray(expected_ppg, dtype=float)
+    ceiling_ppg = np.asarray(ceiling_ppg, dtype=float)
+    q75 = np.asarray(q75, dtype=float)
+    # np.lexsort's LAST key is primary -- so -expected_ppg (ascending sort == descending
+    # ppg) is primary, -ceiling_ppg secondary, -q75 tertiary. lexsort always returns a
+    # full permutation of range(n) regardless of ties, so ranks[order] = 1..n below is
+    # guaranteed to be a permutation even when many players share identical scores.
+    order = np.lexsort((-q75, -ceiling_ppg, -expected_ppg))
+    ranks = np.empty(n, dtype=int)
+    ranks[order] = np.arange(1, n + 1)
+    return ranks
+
+
 def _cdf_at(threshold: np.ndarray, quantile_points: np.ndarray, alphas: np.ndarray) -> np.ndarray:
     """P(ppg <= threshold) per row, via linear interpolation of that row's (ppg, alpha)
 
@@ -261,6 +321,9 @@ def compute_projections_for_position(scored: pd.DataFrame, label_position: str, 
     out["expected_ppg"] = out[qm.ALPHA_COL[0.50]]
     out["ceiling_ppg"] = out[qm.ALPHA_COL[0.90]]
     out["predicted_finish_rank"] = predicted_finish_rank(out[qm.ALPHA_COL[0.50]].to_numpy(dtype=float), label_position, lookup)
+    out["cohort_rank"] = cohort_rank(
+        out["expected_ppg"].to_numpy(dtype=float), out["ceiling_ppg"].to_numpy(dtype=float), out[qm.ALPHA_COL[0.75]].to_numpy(dtype=float)
+    )
 
     startable_k = int(labels_cfg["thresholds"][label_position]["finish_top"])
     useful_k = 2 * startable_k
@@ -272,7 +335,20 @@ def compute_projections_for_position(scored: pd.DataFrame, label_position: str, 
 
     adp_worse_than = float(labels_cfg["thresholds"][label_position]["adp_worse_than"])
     out["breakout_eligible"] = out["expectation_pos_rank"] >= adp_worse_than
-    out["value_gap"] = out["expectation_pos_rank"] - out["predicted_finish_rank"]
+    # value_gap (cohort-based -- see module docstring's "Eligibility & value gap"
+    # section): both sides of this subtraction now rank the SAME population (the
+    # market's ECR ranks roughly this same scored cohort), unlike the old
+    # predicted_finish_rank-based gap, which compared a market rank to a typical-YEAR
+    # mapping and so read systematically negative for every top-priced player (a median
+    # projection structurally cannot reach the historical rank-1 threshold -- see
+    # cohort_rank's docstring). value_gap_typical is kept, unrenamed in meaning, for
+    # continuity with the pre-fix metric -- the holdout audit's original validated
+    # tercile signal was measured on it, and its metric-decision re-grade (see
+    # src.audit.holdout_board_audit.value_gap_metric_comparison / the audit report's
+    # "Metric decision" subsection) is what the board's own "Value gap" column display
+    # actually follows, since that decision can go either way depending on the run.
+    out["value_gap"] = out["expectation_pos_rank"] - out["cohort_rank"]
+    out["value_gap_typical"] = out["expectation_pos_rank"] - out["predicted_finish_rank"]
     return out
 
 

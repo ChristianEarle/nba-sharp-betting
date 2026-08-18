@@ -918,8 +918,8 @@ def attach_overlay(board: pd.DataFrame, crosswalk: pl.DataFrame) -> pd.DataFrame
 
 
 _PROJECTION_COLS = [
-    "gsis_id", "floor_ppg", "expected_ppg", "ceiling_ppg", "predicted_finish_rank",
-    "p_elite_raw", "p_startable_raw", "p_useful_raw", "value_gap", "startable_k", "useful_k",
+    "gsis_id", "floor_ppg", "expected_ppg", "ceiling_ppg", "predicted_finish_rank", "cohort_rank",
+    "p_elite_raw", "p_startable_raw", "p_useful_raw", "value_gap", "value_gap_typical", "startable_k", "useful_k",
 ]
 
 
@@ -991,12 +991,24 @@ def build_veteran_board() -> pd.DataFrame:
 
 
 def build_projection_sentence(row: pd.Series) -> str | float:
-    """"Projects 11.4 pts/gm (range 7.8-15.1) -> ~WR24 finish; priced WR39 -> +15 spots of
+    """"Projects RB1 of 2026 (15.7 pts/gm, range 12.4-20.4); a season like his median
 
-    value; 34% to be a weekly starter, 8% top-5" -- the plain-language echo of every
-    quantile-derived column on one player-detail line. Returns NaN (not a string) when
-    the quantile columns are null (no bundle for that position yet), matching every
-    other quantile-derived column's null-when-absent convention.
+    projection historically finishes ~RB10; priced RB1 -> +0 spots of value; 74% to be
+    a weekly starter, 18% top-5" -- the plain-language echo of every quantile-derived
+    column on one player-detail line. Headlines ``cohort_rank`` (where he stacks up
+    against every OTHER player scored at his position this year -- the same universe
+    the market's own ECR ranks) rather than ``predicted_finish_rank`` (where a TYPICAL
+    season with his own median projection would have finished, historically) -- see
+    ``src.inference.projections``' "Two ranks, not one" docstring section for why these
+    are genuinely different questions, not two names for the same number: mapping every
+    player's median projection onto the historical points-to-rank curve made even the
+    #1 projected player at a position read as "~RB10", because a median projection
+    structurally can't reach a historical RB1's extreme order-statistic threshold.
+    ``value_gap`` (displayed here) is the cohort-based gap (``expectation_pos_rank -
+    cohort_rank``); ``value_gap_typical`` is still computed and kept on the board CSV
+    for continuity, not repeated in this sentence. Returns NaN (not a string) when the
+    quantile columns are null (no bundle for that position yet), matching every other
+    quantile-derived column's null-when-absent convention.
     """
     if pd.isna(row.get("expected_ppg")):
         return np.nan
@@ -1005,9 +1017,13 @@ def build_projection_sentence(row: pd.Series) -> str | float:
     gap_str = f"+{gap:.0f} spots of value" if pd.notna(gap) and gap > 0 else (f"{gap:.0f} spots below market" if pd.notna(gap) else "n/a")
     market_rank = row.get("expectation_pos_rank")
     market_str = f"priced {pos}{int(market_rank)}" if pd.notna(market_rank) else "unpriced"
+    cohort = row.get("cohort_rank")
+    cohort_str = f"{pos}{int(cohort)} of {row.get('season', SEASON):.0f}" if pd.notna(cohort) else "unranked"
+    typical = row.get("predicted_finish_rank")
+    typical_str = f"; a season like his median projection historically finishes ~{pos}{int(round(typical))}" if pd.notna(typical) else ""
     return (
-        f"Projects {row['expected_ppg']:.1f} pts/gm (range {row['floor_ppg']:.1f}-{row['ceiling_ppg']:.1f}) "
-        f"-> ~{pos}{int(round(row['predicted_finish_rank']))} finish; {market_str} -> {gap_str}; "
+        f"Projects {cohort_str} ({row['expected_ppg']:.1f} pts/gm, range {row['floor_ppg']:.1f}-{row['ceiling_ppg']:.1f})"
+        f"{typical_str}; {market_str} -> {gap_str}; "
         f"{row['p_startable']*100:.0f}% to be a weekly starter, {row['p_elite']*100:.0f}% top-5"
     )
 
@@ -1089,8 +1105,13 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         "implied_pts", "edge", "availability", "shap_top3", "rationale",
         # v2.0 quantile-derived columns (Deliverable 4) -- null for a position with no
         # quantile bundle yet, same convention as every other optional overlay column above.
-        "floor_ppg", "expected_ppg", "ceiling_ppg", "predicted_finish_rank",
-        "p_startable", "p_elite", "p_useful", "value_gap", "breakout_eligible",
+        # cohort_rank (this year's field) and predicted_finish_rank (a typical season with
+        # this q50) are two different questions -- see src.inference.projections' "Two
+        # ranks, not one" docstring section. value_gap is now cohort-based (the display
+        # default); value_gap_typical is the old predicted_finish_rank-based metric, kept
+        # for continuity -- see src.audit.holdout_board_audit for how both grade.
+        "floor_ppg", "expected_ppg", "ceiling_ppg", "predicted_finish_rank", "cohort_rank",
+        "p_startable", "p_elite", "p_useful", "value_gap", "value_gap_typical", "breakout_eligible",
         "primary_engine", "projection_sentence", "already_priced_as_starter",
         "seg_elite", "seg_starter", "seg_useful", "seg_bust",
         "broke_out_last_season",
@@ -1143,13 +1164,29 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
     lines.append("")
     lines.append(
         "> **v2.0 (two lenses):** every veteran also carries a quantile-regression projection "
-        "(`floor_ppg`/`expected_ppg`/`ceiling_ppg` = q10/q50/q90 of his predicted ppr-ppg distribution, "
-        "`predicted_finish_rank`, and the outcome ladder `p_elite`/`p_startable`/`p_useful` -- see README's v2.0 "
-        "section). **Breakout Hunt** below ranks only `breakout_eligible` players (the same eligibility gate "
-        "`src.labels.build` uses to define a breakout at all) by whichever engine Deliverable 3's comparison gate "
-        "picked as primary for that position (`primary_engine` column -- classifier `probability` or quantile "
-        "`p_startable`); **Full Projections** ranks EVERY scored veteran by `expected_ppg`, eligible or not. "
-        "Neither lens replaces the other; both read off the same underlying columns."
+        "(`floor_ppg`/`expected_ppg`/`ceiling_ppg` = q10/q50/q90 of his predicted ppr-ppg distribution) and the "
+        "outcome ladder `p_elite`/`p_startable`/`p_useful` -- see README's v2.0 section. **Breakout Hunt** below "
+        "ranks only `breakout_eligible` players (the same eligibility gate `src.labels.build` uses to define a "
+        "breakout at all) by whichever engine Deliverable 3's comparison gate picked as primary for that position "
+        "(`primary_engine` column -- classifier `probability` or quantile `p_startable`); **Full Projections** "
+        "ranks EVERY scored veteran by `expected_ppg`, eligible or not. Neither lens replaces the other; both read "
+        "off the same underlying columns."
+    )
+    lines.append("")
+    lines.append(
+        "> **v2.3 (two ranks, not one):** `cohort_rank` is where a player's median projection stacks up against "
+        "every OTHER player scored at his position this year -- the same field the market's own ECR ranks -- and "
+        "is the rank behind the tables' **Projects (2026)** column, a headline display fix (see "
+        "`src.inference.projections`' \"Two ranks, not one\" docstring section): mapping every player's median "
+        "projection onto the historical points-to-rank curve made even the #1 projected player at a position read "
+        "as `~pos10`, because a median projection structurally cannot reach a historical rank-1's extreme "
+        "order-statistic threshold. `predicted_finish_rank` (**Typical finish**) is that historical mapping, kept "
+        "unchanged alongside the new rank. **The Value gap column is `value_gap_typical`** (`= consensus ECR rank "
+        "- predicted_finish_rank`), NOT the new cohort-based gap (shown separately as **Value gap (cohort)** = "
+        "`consensus ECR rank - cohort_rank`) -- the holdout audit's metric-decision run "
+        "(`outputs/holdout_board_audit.md`'s \"Metric decision\" subsection) found the cohort-based gap grades "
+        "WORSE as a realized-outcome sorter, so the headline rank display changed but the validated sorter did "
+        "not: this is a deliberate, measured decision, not an oversight."
     )
     lines.append("")
     lines.append("## Breakout Hunt")
@@ -1165,11 +1202,16 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         sub = sub.sort_values(sort_col, ascending=False, na_position="last")
         lines.append(f"### {pos} — primary engine: **{engine}**")
         lines.append("")
-        headers = ["Player", "Team", "Probability", "P(startable)", "P(elite)", "P(useful)", "Tier", "Predicted finish", "Consensus (ECR)", "Value gap", "Availability"]
+        # Value gap here is value_gap_typical (predicted_finish_rank-based) -- see the
+        # v2.3 note above the Breakout Hunt/Full Projections headers: the holdout audit's
+        # metric-decision run found the cohort-based gap grades WORSE as a sorter (see
+        # outputs/holdout_board_audit.md's "Metric decision" subsection / README), so the
+        # validated metric, not the new headline rank, stays the one used for this column.
+        headers = ["Player", "Team", "Probability", "P(startable)", "P(elite)", "P(useful)", "Tier", "Projects (2026)", "Consensus (ECR)", "Value gap", "Availability"]
         rows = [
             [
                 row["player_name"], row["team"], row["probability"], row["p_startable"], row["p_elite"], row["p_useful"],
-                row["tier"], row["predicted_finish_rank"], row["consensus_ecr_pos_rank"], row["value_gap"], row["availability"],
+                row["tier"], row["cohort_rank"], row["consensus_ecr_pos_rank"], row["value_gap_typical"], row["availability"],
             ]
             for _, row in sub.iterrows()
         ]
@@ -1187,11 +1229,21 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         sub = sub.sort_values("expected_ppg", ascending=False)
         lines.append(f"### {pos}")
         lines.append("")
-        headers = ["Player", "Team", "Floor", "Expected", "Ceiling", "Predicted finish", "Consensus (ECR)", "Value gap", "P(startable)", "P(elite)", "P(useful)", "Badge"]
+        # Value gap = value_gap_typical (validated sorter); Value gap (cohort) = value_gap
+        # (the new cohort-based metric, presentational -- see the v2.3 note above and
+        # outputs/holdout_board_audit.md's "Metric decision" subsection for why these are
+        # NOT the same column: the display headline (Projects (2026)) is cohort-based on
+        # purpose, but the metric-comparison run found that gap grades worse than the
+        # original predicted_finish_rank-based one as a sorter of realized outcomes.
+        headers = [
+            "Player", "Team", "Floor", "Expected", "Ceiling", "Projects (2026)", "Typical finish",
+            "Consensus (ECR)", "Value gap", "Value gap (cohort)", "P(startable)", "P(elite)", "P(useful)", "Badge",
+        ]
         rows = [
             [
                 row["player_name"], row["team"], row["floor_ppg"], row["expected_ppg"], row["ceiling_ppg"],
-                row["predicted_finish_rank"], row["consensus_ecr_pos_rank"], row["value_gap"],
+                row["cohort_rank"], row["predicted_finish_rank"], row["consensus_ecr_pos_rank"],
+                row["value_gap_typical"], row["value_gap"],
                 row["p_startable"], row["p_elite"], row["p_useful"],
                 "already priced as a starter" if row["already_priced_as_starter"] else "",
             ]
@@ -1211,8 +1263,8 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         headers = [
             "Player", "Age", "Team", "Probability", "Tier", "Base-rate x", "Raw calibrated", "Raw score",
             "Exp. rank Δ", "Consensus (ECR)", "Sleeper ADP", "ADP gap", "Vegas implied", "Edge", "Availability",
-            "Top drivers", "Rationale", "Floor", "Expected", "Ceiling", "Predicted finish",
-            "P(startable)", "P(elite)", "P(useful)", "Value gap", "Eligible", "Primary engine", "Projection sentence",
+            "Top drivers", "Rationale", "Floor", "Expected", "Ceiling", "Projects (2026)", "Typical finish",
+            "P(startable)", "P(elite)", "P(useful)", "Value gap", "Value gap (cohort)", "Eligible", "Primary engine", "Projection sentence",
         ]
         rows = [
             [
@@ -1220,9 +1272,9 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
                 row["base_rate_multiple"], row["probability_calibrated_raw"], row["raw_score"],
                 row["expected_rank_delta"], row["consensus_ecr_pos_rank"], row["sleeper_adp_pos_rank"],
                 row["adp_gap"], row["implied_pts"], row["edge"], row["availability"], row["shap_top3"], row["rationale"],
-                row["floor_ppg"], row["expected_ppg"], row["ceiling_ppg"], row["predicted_finish_rank"],
-                row["p_startable"], row["p_elite"], row["p_useful"], row["value_gap"], row["breakout_eligible"],
-                row["primary_engine"], row["projection_sentence"],
+                row["floor_ppg"], row["expected_ppg"], row["ceiling_ppg"], row["cohort_rank"], row["predicted_finish_rank"],
+                row["p_startable"], row["p_elite"], row["p_useful"], row["value_gap_typical"], row["value_gap"],
+                row["breakout_eligible"], row["primary_engine"], row["projection_sentence"],
             ]
             for _, row in sub.iterrows()
         ]
