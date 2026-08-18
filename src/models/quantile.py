@@ -176,9 +176,19 @@ def tree_feature_columns(df: pd.DataFrame, cfg: dict) -> list[str]:
 
     rule to ``src.models.train.tree_feature_columns`` (including that module's
     ``excluded_features`` config gate, the Vegas-promotion rule) plus this module's own
-    extra non-feature columns (the target ``ppr_ppg`` and the pool-gate ``games``).
+    extra non-feature columns (the target ``ppr_ppg`` and the pool-gate ``games``), UNION
+    ``excluded_features_quantile`` (v2.4 -- ``src.models.vacancy_gate``'s quantile gate).
+    The two exclusion lists are separate config keys, not one shared list: the classifier
+    and quantile heads are graded by genuinely different metrics (top-10 precision/PR-AUC
+    vs Spearman/pinball) and can legitimately disagree on whether a column earns its
+    keep -- a single shared ``excluded_features`` would force a column excluded for one
+    head to also be excluded for the other, even when only one gate rejected it. A column
+    the CLASSIFIER gate rejects still lands in ``excluded_features`` (this module reads
+    that key too, via the union), but the reverse -- a column only the QUANTILE gate
+    rejects -- needs its own key, since the classifier's ``excluded_features`` is never
+    written to by this module.
     """
-    excluded = set(cfg.get("excluded_features", []))
+    excluded = set(cfg.get("excluded_features", [])) | set(cfg.get("excluded_features_quantile", []))
     non_feature = set(train.IDENTITY_COLS) | _NON_FEATURE_EXTRA
     return [c for c in df.columns if c not in non_feature and c not in excluded]
 

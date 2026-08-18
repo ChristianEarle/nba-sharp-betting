@@ -74,6 +74,18 @@ Column groups in the output
   (yardline_100<=20) / end-zone-adjacent (<=10) targets -- see
   ``src.features.shared.redzone_share_table``)
 
+v2.4 addition (team-change/vacancy, gated -- src.models.vacancy_gate): qb_continuity
+(share of the team's N-1 pass attempts thrown by QBs still on its Week-1 season-N
+roster -- new-QB-situation reads low), vacated_td_share (share of the team's N-1
+offensive TDs belonging to players absent from that roster), vacated_goal_line_carry_share
+(pbp-derived, yardline_100<=5 analogue of vacated_carry_share), and
+max_single_vacated_target_share/max_single_vacated_carry_share (the single largest
+departed player's own share, vs vacated_shares' population SUM -- star departure vs
+diffuse churn). All derived purely from roster diffs (season_roster_team) and N-1
+usage -- see src.features.shared's docstrings above each builder. Starts excluded from
+every position's shipped model (configs/model_{pos}.yaml's excluded_features) until
+src.models.vacancy_gate's frozen-hyperparameter retrain proves it doesn't regress.
+
 Optional inputs (snap_counts, ngs_receiving, coaching_changes, pbp) are
 genuinely optional: every function here runs fine with any of them
 ``None``, producing null columns instead of raising. Verified against
@@ -168,6 +180,7 @@ _OUT_COLUMNS = (
         "young_stayer",
         "moved_into_vacancy",
     ]
+    + sh.VACANCY_COLUMNS_WR_TE_RB
 )
 
 
@@ -472,6 +485,11 @@ def build_features_wr(
     out = sh.attach_path_to_volume(out, "vacated_target_share")
     out = sh.attach_young_stayer(out)
     out = sh.attach_moved_into_vacancy(out, "vacated_target_share")
+
+    # v2.4: QB continuity + TD/goal-line vacancy + star-departure columns -- see
+    # src.features.shared.attach_wr_te_rb_vacancy_features's docstring. Gated
+    # (src.models.vacancy_gate) before shipping in any position's actual model.
+    out = sh.attach_wr_te_rb_vacancy_features(out, reg, season_team, pbp)
 
     out = out.with_columns(pl.min_horizontal(pl.col("years_exp"), pl.lit(10)).alias("year_in_league"))
     out = sh.add_covid_flag(out)

@@ -266,12 +266,12 @@ def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
                 "fppg": r["floor_ppg"] if pd.notna(r.get("floor_ppg")) else None,
                 "eppg": r["expected_ppg"] if pd.notna(r.get("expected_ppg")) else None,
                 "cppg": r["ceiling_ppg"] if pd.notna(r.get("ceiling_ppg")) else None,
-                # v2.3: cohort_rank (this year's field, "Projects PosN of 2026" -- the new
-                # headline rank) vs predicted_finish_rank (a typical season with this q50,
-                # historically -- unchanged) -- see src.inference.projections' "Two ranks,
-                # not one" docstring section.
+                # Peer-rank-only display (this session, user preference): cohort_rank
+                # ("Projects PosN of 2026") is the ONLY rank sent to the dashboard --
+                # predicted_finish_rank (the historical-typical-season mapping, formerly
+                # "pfr") is dropped from this payload entirely; it stays CSV-only for
+                # analysts (see src.inference.board_2026.write_board's veteran_cols note).
                 "cr": r["cohort_rank"] if pd.notna(r.get("cohort_rank")) else None,
-                "pfr": r["predicted_finish_rank"] if pd.notna(r.get("predicted_finish_rank")) else None,
                 "pel": r["p_elite"] if pd.notna(r.get("p_elite")) else None,
                 "pst": r["p_startable"] if pd.notna(r.get("p_startable")) else None,
                 "pus": r["p_useful"] if pd.notna(r.get("p_useful")) else None,
@@ -280,18 +280,23 @@ def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
                     if pd.notna(r.get("seg_elite"))
                     else None
                 ),
-                # v2.3: the displayed/colored "Value gap" column is value_gap_typical
-                # (predicted_finish_rank-based) -- the holdout audit's metric-decision run
-                # (src.audit.holdout_board_audit.value_gap_metric_comparison) found the new
-                # cohort-based value_gap grades WORSE as a realized-outcome sorter, so the
-                # headline rank display changed (cr, above) but the validated sort/color
-                # metric did not. `vgc` (cohort-based) is kept alongside for anyone reading
-                # the raw row data, e.g. via the board CSV. See outputs/holdout_board_audit.md's
-                # "Metric decision" subsection and README for the full reasoning.
-                "vg": r["value_gap_typical"] if pd.notna(r.get("value_gap_typical")) else None,
-                "vgc": r["value_gap"] if pd.notna(r.get("value_gap")) else None,
+                # Peer-rank-only display (this session): the displayed/colored "Value gap"
+                # (`vg`) is now value_gap (cohort-based), by explicit user preference --
+                # overriding the holdout audit's own tercile-spread-measured lean toward
+                # value_gap_typical (`outputs/holdout_board_audit.md`'s "Metric decision"
+                # subsection: both metrics grade ~+30pt, value_gap_typical a few points
+                # ahead -- close enough that the user's peer-comparison preference decides
+                # it). value_gap_typical (formerly `vgc`'s inverse) is dropped from this
+                # payload -- it stays CSV-only for analysts.
+                "vg": r["value_gap"] if pd.notna(r.get("value_gap")) else None,
                 "aps": bool(r["already_priced_as_starter"]) if pd.notna(r.get("already_priced_as_starter")) else None,
                 "psent": r["projection_sentence"] if pd.notna(r.get("projection_sentence")) else None,
+                # v2.4: low-octane-offense risk flag (src.inference.board_2026.
+                # compute_low_octane_flags) -- "loc" (0/1) + "locsrc" ("Vegas" or "est.",
+                # for clear source labeling in the chip -- never presented as more certain
+                # than it is). Presentation/risk-flag only, never a model input.
+                "loc": bool(r["low_octane_offense"]) if pd.notna(r.get("low_octane_offense")) else False,
+                "locsrc": r["low_octane_source"] if pd.notna(r.get("low_octane_source")) else None,
             }
         )
     return rows

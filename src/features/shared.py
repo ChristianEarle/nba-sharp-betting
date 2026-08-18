@@ -362,11 +362,15 @@ def team_change_flag(season_team: pl.DataFrame, team_assign: pl.DataFrame) -> pl
 
 
 def player_team_usage(reg: pl.DataFrame) -> pl.DataFrame:
-    """season, gsis_id, team -> targets, receptions, rec_yards, air_yards, rec_tds, carries.
+    """season, gsis_id, team -> targets, receptions, rec_yards, air_yards, rec_tds, rush_tds,
 
-    Scoped to a single team-season (a player traded mid-season gets one row
-    per team he played for), the building block for both team_usage_totals
-    below and target_share/air_yards_share in src.features.wr.
+    carries, attempts. Scoped to a single team-season (a player traded mid-season gets one
+    row per team he played for), the building block for both team_usage_totals below and
+    target_share/air_yards_share in src.features.wr. ``rush_tds``/``attempts`` (v2.4) feed
+    the vacated_td_share / qb_continuity team-context builders below -- same "every
+    position, every row" scope as every other column here (a caller filters ``reg`` to one
+    position first when it wants a position-scoped numerator, e.g. QB attempts for
+    qb_continuity).
     """
     return reg.group_by(["season", "player_id", "team"]).agg(
         pl.col("targets").sum().alias("targets"),
@@ -374,23 +378,91 @@ def player_team_usage(reg: pl.DataFrame) -> pl.DataFrame:
         pl.col("receiving_yards").sum().alias("rec_yards"),
         pl.col("receiving_air_yards").sum().alias("air_yards"),
         pl.col("receiving_tds").sum().alias("rec_tds"),
+        pl.col("rushing_tds").sum().alias("rush_tds"),
         pl.col("carries").sum().alias("carries"),
+        pl.col("attempts").sum().alias("attempts"),
     ).rename({"player_id": "gsis_id"})
 
 
 def team_usage_totals(reg: pl.DataFrame) -> pl.DataFrame:
-    """season, team -> team_targets, team_carries, team_air_yards, team_rush_yards (all positions, all rows).
+    """season, team -> team_targets, team_carries, team_air_yards, team_rush_yards,
+
+    team_attempts, team_off_tds (all positions, all rows).
 
     ``team_rush_yards`` (added for QB's rush_yard_share — see
     ``src.features.qb``) is every rusher's yards on the team, QB scrambles
     and designed runs included, same "every position, every row" scope as
-    the other three totals.
+    the other three totals. ``team_attempts`` (v2.4, qb_continuity) and
+    ``team_off_tds`` (v2.4, vacated_td_share -- rushing + receiving TDs,
+    every scorer) follow the identical whole-team convention.
     """
     return reg.group_by(["season", "team"]).agg(
         pl.col("targets").sum().alias("team_targets"),
         pl.col("carries").sum().alias("team_carries"),
         pl.col("receiving_air_yards").sum().alias("team_air_yards"),
         pl.col("rushing_yards").sum().alias("team_rush_yards"),
+        pl.col("attempts").sum().alias("team_attempts"),
+        (pl.col("receiving_tds").sum() + pl.col("rushing_tds").sum()).alias("team_off_tds"),
+    )
+
+
+# Decimal places every *SUM* of already-computed float shares (never a MAX, and never a
+# sum of raw integer counts -- both exact/order-independent already) is rounded to on the
+# way out. Diagnosed this session (v2.4): polars' group_by().agg(.sum()) over floats is
+# NOT guaranteed bit-identical across repeated process runs on identical input --
+# floating-point addition is non-associative, and polars' parallel/vectorized reduction
+# order isn't pinned to a fixed thread/chunk schedule, so a share value that logically
+# should read exactly 0.1607142857142857 on every run can differ in the ~15th significant
+# digit run to run. Harmless for the share's own meaning (12 decimal places is far past
+# any real precision this business quantity carries) but NOT harmless for anything that
+# groups by exact float equality downstream -- confirmed via
+# ``src.dashboard.build.feature_profiles``'s ``rank(pct=True)`` (tied players' shares seen
+# as equal on one run, no longer tied on the next, shifting displayed percentiles) is
+# exactly what broke ``tests/test_dashboard.py::test_build_twice_is_byte_identical``
+# after ``vacated_td_share`` started shipping as a live SHAP feature. Verified BOTH this
+# new column and the pre-existing ``vacated_shares``/``returning_incumbent_share`` (same
+# group_by+sum shape) reproduce the jitter on two back-to-back calls with identical
+# inputs -- this is a systemic, pre-existing property of the aggregation pattern, not
+# something unique to the new columns; every SUM-shaped vacated_*/returning_incumbent_share
+# builder below rounds its output for this reason.
+_FLOAT_SUM_ROUND_DP = 12
+
+
+def _departed_player_rows(shares: pl.DataFrame, season_team: pl.DataFrame) -> pl.DataFrame:
+    """Given a per-(season, team, gsis_id) N-1 usage-share frame (unshifted), attach
+
+    ``season_n_team`` (the player's season-N team, per ``season_roster_team``) and filter
+    to rows where the player is NOT on that (season, team)'s season-N roster -- i.e.
+    "departed" (including a player who left the league entirely and has no season-N
+    roster row at all). The shared "who left this team" join every ``vacated_*``
+    team-context builder below reuses (``vacated_shares``' own target/carry columns,
+    ``vacated_td_share_table``, ``vacated_goal_line_carry_share_table``,
+    ``max_single_vacated_share``) -- computed exactly once so a future vacated-* feature
+    doesn't re-derive this join a fourth way. Does NOT apply the N-1 -> N season shift --
+    callers do that themselves after aggregating, matching ``vacated_shares``' own
+    pre-v2.4 convention.
+    """
+    lookup = season_team.select("season", "gsis_id", pl.col("team").alias("season_n_team")).with_columns(
+        (pl.col("season") - 1).alias("season")
+    )
+    joined = shares.join(lookup, on=["season", "gsis_id"], how="left")
+    return joined.filter((pl.col("season_n_team").is_null()) | (pl.col("season_n_team") != pl.col("team")))
+
+
+def _target_carry_player_shares(reg: pl.DataFrame) -> pl.DataFrame:
+    """season, team, gsis_id -> player_target_share, player_carry_share: each player's N-1
+
+    team-relative target/carry share (plain division, matching ``vacated_shares``' original
+    formula exactly -- NOT ``safe_div``, so a genuine 0/0 team-total stays float NaN here,
+    unchanged pre-v2.4 behavior). Shared building block for ``vacated_shares`` (sums this
+    over the departed population) and ``max_single_vacated_share`` (takes the max instead).
+    """
+    usage = player_team_usage(reg)
+    totals = team_usage_totals(reg)
+    shares = usage.join(totals, on=["season", "team"], how="left")
+    return shares.with_columns(
+        (pl.col("targets") / pl.col("team_targets")).alias("player_target_share"),
+        (pl.col("carries") / pl.col("team_carries")).alias("player_carry_share"),
     )
 
 
@@ -404,28 +476,167 @@ def vacated_shares(reg: pl.DataFrame, season_team: pl.DataFrame) -> pl.DataFrame
     players who left the league entirely and have no season-N roster row
     at all).
     """
+    shares = _target_carry_player_shares(reg)
+    departed = _departed_player_rows(shares, season_team)
+
+    out = departed.group_by(["season", "team"]).agg(
+        pl.col("player_target_share").sum().round(_FLOAT_SUM_ROUND_DP).alias("vacated_target_share"),
+        pl.col("player_carry_share").sum().round(_FLOAT_SUM_ROUND_DP).alias("vacated_carry_share"),
+    )
+    return out.with_columns((pl.col("season") + 1).alias("season"))
+
+
+def max_single_vacated_share(reg: pl.DataFrame, season_team: pl.DataFrame) -> pl.DataFrame:
+    """season (N), team -> max_single_vacated_target_share, max_single_vacated_carry_share (v2.4).
+
+    ``vacated_shares``' MAX instead of SUM: the single largest departed player's own N-1
+    target/carry share, not the whole departed population's combined share. Distinguishes a
+    star departure (one big number) from diffuse churn (several small departures summing to
+    the same ``vacated_*_share`` total) -- a signal ``vacated_shares`` alone can't carry,
+    since summing loses which departure did the work. Built on the identical
+    ``_target_carry_player_shares``/``_departed_player_rows`` machinery ``vacated_shares``
+    uses (same departed population, same per-player shares), so the two are always
+    consistent with each other (max <= sum for any team by construction). Null wherever a
+    team had no departed players with any usage at all (no row to take a max over), same
+    "nullable, not guessed" contract as every other vacated-* column.
+    """
+    shares = _target_carry_player_shares(reg)
+    departed = _departed_player_rows(shares, season_team)
+
+    out = departed.group_by(["season", "team"]).agg(
+        pl.col("player_target_share").max().alias("max_single_vacated_target_share"),
+        pl.col("player_carry_share").max().alias("max_single_vacated_carry_share"),
+    )
+    return out.with_columns((pl.col("season") + 1).alias("season"))
+
+
+def vacated_td_share_table(reg: pl.DataFrame, season_team: pl.DataFrame) -> pl.DataFrame:
+    """season (N), team -> vacated_td_share (v2.4).
+
+    Share of the team's N-1 offensive TDs (rushing + receiving, ``team_off_tds`` --
+    ``team_usage_totals``) belonging to players absent from the Week-1 season-N roster
+    (the ``_departed_player_rows`` population ``vacated_shares`` also uses). E.g. a goal-
+    line back or a team's top red-zone receiver departing directly frees up TD equity for
+    whoever inherits the touches, independent of whether the *volume* (targets/carries)
+    share moved by the same amount -- a player can absorb a departed teammate's touches
+    without absorbing his scoring rate. ``safe_div`` (not plain division, unlike
+    ``vacated_shares``): a genuine team with zero N-1 offensive TDs is a real, if rare,
+    0/0 that should read as null, not NaN.
+    """
     usage = player_team_usage(reg)
     totals = team_usage_totals(reg)
     shares = usage.join(totals, on=["season", "team"], how="left")
     shares = shares.with_columns(
-        (pl.col("targets") / pl.col("team_targets")).alias("player_target_share"),
-        (pl.col("carries") / pl.col("team_carries")).alias("player_carry_share"),
+        safe_div(pl.col("rec_tds") + pl.col("rush_tds"), pl.col("team_off_tds")).alias("player_td_share")
     )
-
-    # For each N-1 usage row, look up that player's season-N team (N-1 + 1).
-    lookup = season_team.select("season", "gsis_id", pl.col("team").alias("season_n_team")).with_columns(
-        (pl.col("season") - 1).alias("season")
-    )
-    shares = shares.join(lookup, on=["season", "gsis_id"], how="left")
-    departed = shares.filter(
-        (pl.col("season_n_team").is_null()) | (pl.col("season_n_team") != pl.col("team"))
-    )
+    departed = _departed_player_rows(shares, season_team)
 
     out = departed.group_by(["season", "team"]).agg(
-        pl.col("player_target_share").sum().alias("vacated_target_share"),
-        pl.col("player_carry_share").sum().alias("vacated_carry_share"),
+        pl.col("player_td_share").sum().round(_FLOAT_SUM_ROUND_DP).alias("vacated_td_share")
     )
     return out.with_columns((pl.col("season") + 1).alias("season"))
+
+
+# yardline_100 threshold for the goal-line vacated-carry-share feature below -- same
+# "<=5" definition src.features.rb.REDZONE_THRESHOLDS' own goal_line_carry_share uses.
+GOAL_LINE_THRESHOLD = 5
+
+
+def vacated_goal_line_carry_share_table(pbp: pl.DataFrame, season_team: pl.DataFrame) -> pl.DataFrame:
+    """season (N), team -> vacated_goal_line_carry_share (v2.4).
+
+    The pbp-derived, goal-line-scoped (yardline_100<=5) analogue of ``vacated_shares``'
+    ``vacated_carry_share``: share of the team's N-1 goal-line carries belonging to players
+    absent from that team's Week-1 season-N roster (the identical ``_departed_player_rows``
+    population every other vacated_* builder uses) -- e.g. a goal-line back departing frees
+    up short-yardage carries for whoever's left in the backfield, a signal
+    ``vacated_carry_share`` (which covers ALL carries, not just goal-line ones) can miss
+    entirely if the departed back was a committee/passing-down specialist everywhere else
+    on the field but the team's primary short-yardage option. Same slim-pbp-cache
+    filtering ``redzone_share_table`` uses (``rusher_player_id``/``yardline_100``/
+    ``posteam``, REG only); a team-season with zero qualifying goal-line carries at all
+    that season is a real, if rare, 0/0 that reads as null via ``safe_div``, never NaN.
+    """
+    reg = pbp.filter(
+        (pl.col("season_type") == "REG")
+        & (pl.col("rush_attempt") == 1)
+        & pl.col("rusher_player_id").is_not_null()
+        & pl.col("yardline_100").is_not_null()
+        & (pl.col("yardline_100") <= GOAL_LINE_THRESHOLD)
+        & pl.col("posteam").is_not_null()
+    )
+    player_n = (
+        reg.group_by(["season", "rusher_player_id", "posteam"])
+        .agg(pl.len().alias("n"))
+        .rename({"rusher_player_id": "gsis_id", "posteam": "team"})
+    )
+    team_n = reg.group_by(["season", "posteam"]).agg(pl.len().alias("team_n")).rename({"posteam": "team"})
+    shares = player_n.join(team_n, on=["season", "team"], how="left")
+    shares = shares.with_columns(safe_div(pl.col("n"), pl.col("team_n")).alias("player_gl_carry_share"))
+
+    departed = _departed_player_rows(shares, season_team)
+    out = departed.group_by(["season", "team"]).agg(
+        pl.col("player_gl_carry_share").sum().round(_FLOAT_SUM_ROUND_DP).alias("vacated_goal_line_carry_share")
+    )
+    return out.with_columns((pl.col("season") + 1).alias("season"))
+
+
+def qb_continuity_table(reg: pl.DataFrame, season_team: pl.DataFrame) -> pl.DataFrame:
+    """season (N), team -> qb_continuity (v2.4).
+
+    Fraction of the team's N-1 pass attempts (``team_attempts`` -- every attempt thrown by
+    the team, ``team_usage_totals``) thrown by QBs who are STILL on that team's Week-1
+    season-N roster -- ``returning_incumbent_share_table``'s exact "stayed" construction
+    (position="QB", usage_col="attempts", team_total_col="team_attempts"), the mirror
+    image of ``vacated_shares``' "departed" half for the same underlying question (who's
+    still throwing the ball for this team). A new-starting-QB situation (the old starter
+    left, nobody who threw meaningfully for this team last year is still around) reads as
+    LOW; an offense running back its same signal-caller (or a backup who saw real N-1
+    snaps) reads as HIGH. QB rows themselves skip this column entirely (see
+    ``src.features.qb``'s module docstring) -- a QB's own continuity with himself is not a
+    meaningful signal for the thrower; it is wired into WR/TE/RB only, where it answers
+    "how much does this pass-catcher's team's *passing infrastructure* carry over."
+    """
+    out = returning_incumbent_share_table(reg, season_team, position="QB", usage_col="attempts", team_total_col="team_attempts")
+    return out.rename({"returning_incumbent_share": "qb_continuity"})
+
+
+# Every v2.4 vacancy/continuity column, by which position family carries it (see each
+# builder's docstring above). WR/TE/RB get all five; QB gets only vacated_td_share (a
+# team-context fact, not thrower-specific) -- qb_continuity is deliberately skipped for
+# QB rows themselves (meaningless for the thrower, per the brief), and
+# max_single_vacated_share / vacated_goal_line_carry_share have no QB-specific meaning
+# the brief defines. Both gated (src.models.vacancy_gate) before shipping in any
+# position's actual model -- see configs/model_{pos}.yaml's excluded_features.
+VACANCY_COLUMNS_WR_TE_RB = [
+    "qb_continuity",
+    "vacated_td_share",
+    "vacated_goal_line_carry_share",
+    "max_single_vacated_target_share",
+    "max_single_vacated_carry_share",
+]
+VACANCY_COLUMNS_QB = ["vacated_td_share"]
+
+
+def attach_wr_te_rb_vacancy_features(
+    out: pl.DataFrame, reg: pl.DataFrame, season_team: pl.DataFrame, pbp: pl.DataFrame | None
+) -> pl.DataFrame:
+    """Join every VACANCY_COLUMNS_WR_TE_RB column onto ``out`` (must carry season, team) --
+
+    identical wiring for WR/TE/RB (see each module's ``build_features_*`` call site),
+    factored out here so the join order / pbp-absent null-fallback behavior is defined
+    exactly once rather than copy-pasted three times. QB does not use this -- see
+    ``VACANCY_COLUMNS_QB``/``src.features.qb`` (only ``vacated_td_share`` applies there,
+    wired directly at that module's own call site).
+    """
+    out = out.join(qb_continuity_table(reg, season_team), on=["season", "team"], how="left")
+    out = out.join(vacated_td_share_table(reg, season_team), on=["season", "team"], how="left")
+    out = out.join(max_single_vacated_share(reg, season_team), on=["season", "team"], how="left")
+    if pbp is not None:
+        out = out.join(vacated_goal_line_carry_share_table(pbp, season_team), on=["season", "team"], how="left")
+    else:
+        out = out.with_columns(pl.lit(None, dtype=pl.Float64).alias("vacated_goal_line_carry_share"))
+    return out
 
 
 def safe_div(num: pl.Expr, den: pl.Expr) -> pl.Expr:
@@ -991,7 +1202,9 @@ def returning_incumbent_share_table(
     shares = shares.join(lookup, on=["season", "gsis_id"], how="left")
     returning = shares.filter(pl.col("season_n_team") == pl.col("team"))
 
-    out = returning.group_by(["season", "team"]).agg(pl.col("_share").sum().alias("returning_incumbent_share"))
+    out = returning.group_by(["season", "team"]).agg(
+        pl.col("_share").sum().round(_FLOAT_SUM_ROUND_DP).alias("returning_incumbent_share")
+    )
     return out.with_columns((pl.col("season") + 1).alias("season"))
 
 

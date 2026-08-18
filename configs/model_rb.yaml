@@ -63,7 +63,19 @@ adp_source_baseline: ecr
 # precision improvement -- see that module's docstring for the frozen-
 # hyperparameter retrain/compare protocol. Listed here (excluded) by default;
 # a promoted position has this list emptied by the experiment run.
+# v2.4: team-change/vacancy columns (qb_continuity, vacated_td_share,
+# vacated_goal_line_carry_share, max_single_vacated_target_share/carry_share --
+# src.features.shared, wired per position) start excluded here too, same
+# promotion-rule contract as the Vegas columns above -- src.models.vacancy_gate's
+# frozen-hyperparameter retrain empties this list of them iff the gate KEEPs.
 excluded_features: [implied_ppg, implied_win_prob, has_vegas, yards_per_snap_n1, catchable_target_rate_n1, yards_per_snap_yoy_delta, catchable_target_rate_yoy_delta]
+
+# v2.4: QUANTILE-head-only exclusions (src.models.vacancy_gate's quantile gate) --
+# a column can be REJECTed for the quantile head while still being KEPT for the
+# classifier (or vice versa); this list is separate from excluded_features above
+# for exactly that reason (see src.models.quantile.tree_feature_columns's
+# docstring). Empty until a quantile-gate run rejects something.
+excluded_features_quantile: []
 
 # LGBM/XGB train on every numeric feature column in features_rb.parquet
 # (identifiers/labels excluded) — trees handle nulls and high cardinality

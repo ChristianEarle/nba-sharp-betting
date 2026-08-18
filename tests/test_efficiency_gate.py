@@ -169,7 +169,21 @@ def test_run_position_smoke(pos: str, tmp_path, monkeypatch) -> None:
     # must start out holding a real, readable copy of the bundle, not an empty tmp path.
     fake_artifact_path = tmp_path / f"{pos}_model_bundle.joblib"
     joblib.dump(bundle, fake_artifact_path)
-    fake_spec = replace(real_spec, config_path=fake_config_path, artifact_path=fake_artifact_path)
+    # report_path/metrics_json_path must ALSO be faked (not just config/artifact) -- a
+    # KEEP decision calls promote_position, which writes to spec.report_path/
+    # metrics_json_path; leaving those pointed at the real outputs/model_{pos}_{report.md,
+    # metrics.json} would silently overwrite them with a hypothetical promoted-bundle
+    # description that does NOT match the untouched real artifact_path bundle, corrupting
+    # the report/bundle-consistency invariant test_metrics_json_pooled_holdout_pr_auc_
+    # matches_shipped_bundle depends on (surfaced by src.models.vacancy_gate's own smoke
+    # test hitting exactly this gap for a position whose gate decision differs from the
+    # real shipped one -- see tests/test_vacancy_gate.py).
+    fake_report_path = tmp_path / f"model_{pos}_report.md"
+    fake_metrics_path = tmp_path / f"model_{pos}_metrics.json"
+    fake_spec = replace(
+        real_spec, config_path=fake_config_path, artifact_path=fake_artifact_path,
+        report_path=fake_report_path, metrics_json_path=fake_metrics_path,
+    )
 
     original_position_spec = train.position_spec
     monkeypatch.setattr(

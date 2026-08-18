@@ -913,6 +913,76 @@ def attach_overlay(board: pd.DataFrame, crosswalk: pl.DataFrame) -> pd.DataFrame
 
 
 # --------------------------------------------------------------------------
+# v2.4: low-octane-offense risk flag (measured this session, 2020-2025 pooled:
+# startable-season rate 6.7% on bottom-5 preseason-implied-total offenses vs 33.3% on
+# top-5; beat-price rates flat ~48-54% across both groups, so this is a RISK flag --
+# "his team's offense might not generate enough plays/points for anyone on it to have a
+# big season" -- NOT a model feature; the models already rejected Vegas team features
+# twice on holdout accuracy grounds (see README's "Vegas lines: tested, not used"). Also
+# a real confound worth stating alongside the stat: good players tend to play for good
+# offenses (or make them good), so this is not proof a specific player is a bad bet, just
+# a context flag.
+# --------------------------------------------------------------------------
+
+LOW_OCTANE_N = 5
+
+
+def compute_low_octane_flags(schedules: pl.DataFrame, prior_season: int = SEASON - 1) -> pd.DataFrame:
+    """team -> low_octane_offense (0/1), low_octane_source ("Vegas" or "est.").
+
+    Source A (preferred): season-``SEASON`` preseason team lines
+    (``data/external/odds_api/team_lines.parquet``, via ``src.ingest.vegas.build_vegas_team``
+    -- same implied-points-per-game formula ``src.features.shared.attach_vegas_team`` feeds
+    the (rejected-as-a-feature) Vegas columns from). Used only if that file has at least
+    ``LOW_OCTANE_N`` teams actually priced for season ``SEASON`` -- otherwise this is not a
+    real snapshot to flag from, and the function falls through to Source B.
+
+    Source B (fallback -- current repo state, no season-2026 odds_api snapshot exists yet):
+    bottom-``LOW_OCTANE_N`` teams by season ``prior_season`` (2025) ACTUAL points-per-game,
+    computed directly from ``schedules.parquet``'s own REG ``home_score``/``away_score``
+    (every team's own team-code normalized via ``src.features.shared.normalize_team``, same
+    normalization every other team-bearing source in this module goes through). Clearly
+    source-labeled ("est.") wherever it's used, per the brief -- never conflated with a real
+    market read.
+
+    Returns EVERY team with a resolvable score (all 32 in practice), not just the flagged
+    five, so a caller can left-join on "team" and get a real 0 for everyone else -- exactly
+    ``LOW_OCTANE_N`` teams read ``low_octane_offense == 1`` from either source by
+    construction (a plain ascending sort + head(N)).
+    """
+    from src.ingest import vegas as vg_ingest
+
+    if vg_ingest.TEAM_LINES_PATH.exists():
+        team_lines = pl.read_parquet(vg_ingest.TEAM_LINES_PATH)
+        season_lines = team_lines.filter(pl.col("season") == SEASON)
+        if season_lines.height > 0:
+            vt = vg_ingest.build_vegas_team(season_lines).filter(pl.col("season") == SEASON)
+            vt = vt.filter(pl.col("implied_ppg").is_not_null())
+            if vt.height >= LOW_OCTANE_N:
+                bottom = set(vt.sort("implied_ppg").head(LOW_OCTANE_N).get_column("team").to_list())
+                out = vt.with_columns(
+                    pl.col("team").is_in(bottom).cast(pl.Int64).alias("low_octane_offense"),
+                    pl.lit("Vegas").alias("low_octane_source"),
+                ).select("team", "low_octane_offense", "low_octane_source")
+                return out.to_pandas()
+
+    # Source B fallback: season prior_season (2025) actual PPG from schedules' own scores.
+    reg = schedules.filter(
+        (pl.col("season") == prior_season) & (pl.col("game_type") == "REG") & pl.col("home_score").is_not_null()
+    )
+    home = reg.select(pl.col("home_team").alias("team"), pl.col("home_score").alias("pts"))
+    away = reg.select(pl.col("away_team").alias("team"), pl.col("away_score").alias("pts"))
+    allg = sh.normalize_team(pl.concat([home, away], how="vertical_relaxed"), "team")
+    ppg = allg.group_by("team").agg(pl.col("pts").mean().alias("team_ppg"))
+    bottom = set(ppg.sort("team_ppg").head(LOW_OCTANE_N).get_column("team").to_list())
+    out = ppg.with_columns(
+        pl.col("team").is_in(bottom).cast(pl.Int64).alias("low_octane_offense"),
+        pl.lit("est.").alias("low_octane_source"),
+    ).select("team", "low_octane_offense", "low_octane_source")
+    return out.to_pandas()
+
+
+# --------------------------------------------------------------------------
 # Full pipeline
 # --------------------------------------------------------------------------
 
@@ -987,28 +1057,43 @@ def build_veteran_board() -> pd.DataFrame:
         build_projection_sentence(combined.iloc[i]) for i in range(len(combined))
     ]
     combined["already_priced_as_starter"] = ~combined["breakout_eligible"].astype("boolean")
+
+    # v2.4: low-octane-offense risk flag -- see compute_low_octane_flags's docstring.
+    # Presentation/risk-flag only, never a model input.
+    low_octane = compute_low_octane_flags(raw["schedules"])
+    combined = combined.merge(low_octane, on="team", how="left")
+    combined["low_octane_offense"] = combined["low_octane_offense"].fillna(0).astype(int)
+    combined["low_octane_source"] = combined["low_octane_source"].fillna("unknown")
+
     return combined
 
 
 def build_projection_sentence(row: pd.Series) -> str | float:
-    """"Projects RB1 of 2026 (15.7 pts/gm, range 12.4-20.4); a season like his median
+    """"Projects RB1 of 2026 (15.7 pts/gm, range 12.4-20.4); priced RB1 -> +0 spots of
 
-    projection historically finishes ~RB10; priced RB1 -> +0 spots of value; 74% to be
-    a weekly starter, 18% top-5" -- the plain-language echo of every quantile-derived
-    column on one player-detail line. Headlines ``cohort_rank`` (where he stacks up
-    against every OTHER player scored at his position this year -- the same universe
-    the market's own ECR ranks) rather than ``predicted_finish_rank`` (where a TYPICAL
-    season with his own median projection would have finished, historically) -- see
-    ``src.inference.projections``' "Two ranks, not one" docstring section for why these
-    are genuinely different questions, not two names for the same number: mapping every
-    player's median projection onto the historical points-to-rank curve made even the
-    #1 projected player at a position read as "~RB10", because a median projection
-    structurally can't reach a historical RB1's extreme order-statistic threshold.
-    ``value_gap`` (displayed here) is the cohort-based gap (``expectation_pos_rank -
-    cohort_rank``); ``value_gap_typical`` is still computed and kept on the board CSV
-    for continuity, not repeated in this sentence. Returns NaN (not a string) when the
-    quantile columns are null (no bundle for that position yet), matching every other
-    quantile-derived column's null-when-absent convention.
+    value; 74% to be a weekly starter, 18% top-5" -- the plain-language echo of every
+    quantile-derived column on one player-detail line. Headlines ``cohort_rank`` (where
+    he stacks up against every OTHER player scored at his position this year -- the same
+    universe the market's own ECR ranks), peer-comparison only -- the "a season like his
+    median projection historically finishes ~PosN" clause (``predicted_finish_rank``-
+    based) is deliberately dropped from this sentence (peer-rank-only display, user
+    preference this session): a median projection structurally can't reach an all-time
+    #1's extreme order-statistic threshold, and the user reads that framing as unwanted
+    "historically they finish so-and-so" noise vs a straight peer comparison. See
+    ``src.inference.projections``' "Two ranks, not one" docstring section for the full
+    cohort_rank-vs-predicted_finish_rank distinction (``predicted_finish_rank`` is still
+    computed and kept on the board CSV, just no longer surfaced in any user-facing
+    sentence/table). ``value_gap`` (displayed here) is the cohort-based gap
+    (``expectation_pos_rank - cohort_rank``) -- the display AND sort default everywhere
+    on this board as of this session, overriding the audit's own tercile-spread-measured
+    preference for ``value_gap_typical`` (see ``write_board``'s note and
+    ``outputs/holdout_board_audit.md``'s "Metric decision" subsection for the documented
+    tradeoff: both metrics grade at roughly +30pt, and the user's peer-comparison
+    preference wins the tie by explicit choice, not because cohort-based grades better).
+    ``value_gap_typical``/``predicted_finish_rank`` are still computed and kept on the
+    board CSV for continuity/analyst use, not repeated in this sentence. Returns NaN (not
+    a string) when the quantile columns are null (no bundle for that position yet),
+    matching every other quantile-derived column's null-when-absent convention.
     """
     if pd.isna(row.get("expected_ppg")):
         return np.nan
@@ -1019,11 +1104,17 @@ def build_projection_sentence(row: pd.Series) -> str | float:
     market_str = f"priced {pos}{int(market_rank)}" if pd.notna(market_rank) else "unpriced"
     cohort = row.get("cohort_rank")
     cohort_str = f"{pos}{int(cohort)} of {row.get('season', SEASON):.0f}" if pd.notna(cohort) else "unranked"
-    typical = row.get("predicted_finish_rank")
-    typical_str = f"; a season like his median projection historically finishes ~{pos}{int(round(typical))}" if pd.notna(typical) else ""
+    # Peer-rank-only display (user preference, this session): the "a season like his
+    # median projection historically finishes ~PosN" clause (predicted_finish_rank-based)
+    # is dropped entirely -- the user wants players compared to this year's peers, not to
+    # a historical typical-season mapping. predicted_finish_rank/value_gap_typical still
+    # exist on the board CSV for analysts; see write_board's veteran_cols note and
+    # README/outputs/holdout_board_audit.md's "Metric decision" subsection for the
+    # documented tradeoff (value_gap_typical still measures slightly better as a sorter,
+    # ~+33.2pt vs ~+30.0pt tercile spread -- overridden here by explicit user preference).
     return (
         f"Projects {cohort_str} ({row['expected_ppg']:.1f} pts/gm, range {row['floor_ppg']:.1f}-{row['ceiling_ppg']:.1f})"
-        f"{typical_str}; {market_str} -> {gap_str}; "
+        f"; {market_str} -> {gap_str}; "
         f"{row['p_startable']*100:.0f}% to be a weekly starter, {row['p_elite']*100:.0f}% top-5"
     )
 
@@ -1107,14 +1198,24 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         # quantile bundle yet, same convention as every other optional overlay column above.
         # cohort_rank (this year's field) and predicted_finish_rank (a typical season with
         # this q50) are two different questions -- see src.inference.projections' "Two
-        # ranks, not one" docstring section. value_gap is now cohort-based (the display
-        # default); value_gap_typical is the old predicted_finish_rank-based metric, kept
-        # for continuity -- see src.audit.holdout_board_audit for how both grade.
+        # ranks, not one" docstring section. Peer-rank-only display (this session):
+        # predicted_finish_rank/value_gap_typical are ANALYST-ONLY columns as of this
+        # session -- every user-facing table/sentence (write_board's .md output, the
+        # dashboard) shows cohort_rank/value_gap exclusively; both legacy columns stay
+        # here on the CSV for continuity/analysts who want the audit's own originally-
+        # validated (predicted_finish_rank-based) sorter -- see the "Metric decision"
+        # subsection of outputs/holdout_board_audit.md and this function's own v2.3/
+        # peer-rank-only notes below for the measured tradeoff.
         "floor_ppg", "expected_ppg", "ceiling_ppg", "predicted_finish_rank", "cohort_rank",
         "p_startable", "p_elite", "p_useful", "value_gap", "value_gap_typical", "breakout_eligible",
         "primary_engine", "projection_sentence", "already_priced_as_starter",
         "seg_elite", "seg_starter", "seg_useful", "seg_bust",
         "broke_out_last_season",
+        # v2.4: low-octane-offense risk flag (measured 2020-2025 pooled: 6.7% startable-
+        # season rate on bottom-5 preseason-implied-total offenses vs 33.3% on top-5) --
+        # see compute_low_octane_flags's docstring. Presentation/risk-flag only, never a
+        # model input (the models already rejected Vegas team features twice).
+        "low_octane_offense", "low_octane_source",
     ]
     v = attach_broke_out_last_season(veteran_board.copy())
     if not v.empty:
@@ -1174,19 +1275,22 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
     )
     lines.append("")
     lines.append(
-        "> **v2.3 (two ranks, not one):** `cohort_rank` is where a player's median projection stacks up against "
-        "every OTHER player scored at his position this year -- the same field the market's own ECR ranks -- and "
-        "is the rank behind the tables' **Projects (2026)** column, a headline display fix (see "
-        "`src.inference.projections`' \"Two ranks, not one\" docstring section): mapping every player's median "
-        "projection onto the historical points-to-rank curve made even the #1 projected player at a position read "
-        "as `~pos10`, because a median projection structurally cannot reach a historical rank-1's extreme "
-        "order-statistic threshold. `predicted_finish_rank` (**Typical finish**) is that historical mapping, kept "
-        "unchanged alongside the new rank. **The Value gap column is `value_gap_typical`** (`= consensus ECR rank "
-        "- predicted_finish_rank`), NOT the new cohort-based gap (shown separately as **Value gap (cohort)** = "
-        "`consensus ECR rank - cohort_rank`) -- the holdout audit's metric-decision run "
-        "(`outputs/holdout_board_audit.md`'s \"Metric decision\" subsection) found the cohort-based gap grades "
-        "WORSE as a realized-outcome sorter, so the headline rank display changed but the validated sorter did "
-        "not: this is a deliberate, measured decision, not an oversight."
+        "> **Peer-rank-only display (this session, user preference):** `cohort_rank` -- where a player's median "
+        "projection stacks up against every OTHER player scored at his position this year, the same field the "
+        "market's own ECR ranks -- is now the ONLY rank shown anywhere on this board, behind the tables' "
+        "**Projects (2026)** column (see `src.inference.projections`' \"Two ranks, not one\" docstring section for "
+        "the full cohort_rank-vs-predicted_finish_rank distinction). The historical-typical-season mapping "
+        "(`predicted_finish_rank`, formerly shown as **Typical finish**) is dropped from every table/sentence here "
+        "-- a user preference against the \"historically they finish so-and-so\" framing, not a correctness fix; "
+        "it is still computed and kept on the board CSV for analysts. **The Value gap column is now `value_gap`** "
+        "(cohort-based, `= consensus ECR rank - cohort_rank`) -- the display AND the sort default everywhere, also "
+        "by explicit user preference, overriding the holdout audit's own tercile-spread-measured lean toward "
+        "`value_gap_typical` (`outputs/holdout_board_audit.md`'s \"Metric decision\" subsection: both metrics "
+        "grade at roughly +30pt spread, `value_gap_typical` a few points ahead -- close enough that the user's "
+        "peer-comparison preference is the deciding factor, not a claim that cohort-based grades better). "
+        "`value_gap_typical` remains on the board CSV alongside `predicted_finish_rank` for the same "
+        "analyst-continuity reason; the threshold-curve/outcome-ladder machinery underneath both ranks is "
+        "unchanged (the ladder derivation still needs `predicted_finish_rank` internally)."
     )
     lines.append("")
     lines.append("## Breakout Hunt")
@@ -1202,16 +1306,13 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         sub = sub.sort_values(sort_col, ascending=False, na_position="last")
         lines.append(f"### {pos} — primary engine: **{engine}**")
         lines.append("")
-        # Value gap here is value_gap_typical (predicted_finish_rank-based) -- see the
-        # v2.3 note above the Breakout Hunt/Full Projections headers: the holdout audit's
-        # metric-decision run found the cohort-based gap grades WORSE as a sorter (see
-        # outputs/holdout_board_audit.md's "Metric decision" subsection / README), so the
-        # validated metric, not the new headline rank, stays the one used for this column.
+        # Value gap = value_gap (cohort-based) -- the display/sort default everywhere on
+        # this board as of this session; see the peer-rank-only note above.
         headers = ["Player", "Team", "Probability", "P(startable)", "P(elite)", "P(useful)", "Tier", "Projects (2026)", "Consensus (ECR)", "Value gap", "Availability"]
         rows = [
             [
                 row["player_name"], row["team"], row["probability"], row["p_startable"], row["p_elite"], row["p_useful"],
-                row["tier"], row["cohort_rank"], row["consensus_ecr_pos_rank"], row["value_gap_typical"], row["availability"],
+                row["tier"], row["cohort_rank"], row["consensus_ecr_pos_rank"], row["value_gap"], row["availability"],
             ]
             for _, row in sub.iterrows()
         ]
@@ -1229,21 +1330,16 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         sub = sub.sort_values("expected_ppg", ascending=False)
         lines.append(f"### {pos}")
         lines.append("")
-        # Value gap = value_gap_typical (validated sorter); Value gap (cohort) = value_gap
-        # (the new cohort-based metric, presentational -- see the v2.3 note above and
-        # outputs/holdout_board_audit.md's "Metric decision" subsection for why these are
-        # NOT the same column: the display headline (Projects (2026)) is cohort-based on
-        # purpose, but the metric-comparison run found that gap grades worse than the
-        # original predicted_finish_rank-based one as a sorter of realized outcomes.
+        # Value gap = value_gap (cohort-based, peer-rank-only display -- see the note
+        # above); no more "Typical finish" / "Value gap (cohort)" duplicate columns.
         headers = [
-            "Player", "Team", "Floor", "Expected", "Ceiling", "Projects (2026)", "Typical finish",
-            "Consensus (ECR)", "Value gap", "Value gap (cohort)", "P(startable)", "P(elite)", "P(useful)", "Badge",
+            "Player", "Team", "Floor", "Expected", "Ceiling", "Projects (2026)",
+            "Consensus (ECR)", "Value gap", "P(startable)", "P(elite)", "P(useful)", "Badge",
         ]
         rows = [
             [
                 row["player_name"], row["team"], row["floor_ppg"], row["expected_ppg"], row["ceiling_ppg"],
-                row["cohort_rank"], row["predicted_finish_rank"], row["consensus_ecr_pos_rank"],
-                row["value_gap_typical"], row["value_gap"],
+                row["cohort_rank"], row["consensus_ecr_pos_rank"], row["value_gap"],
                 row["p_startable"], row["p_elite"], row["p_useful"],
                 "already priced as a starter" if row["already_priced_as_starter"] else "",
             ]
@@ -1263,8 +1359,8 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
         headers = [
             "Player", "Age", "Team", "Probability", "Tier", "Base-rate x", "Raw calibrated", "Raw score",
             "Exp. rank Δ", "Consensus (ECR)", "Sleeper ADP", "ADP gap", "Vegas implied", "Edge", "Availability",
-            "Top drivers", "Rationale", "Floor", "Expected", "Ceiling", "Projects (2026)", "Typical finish",
-            "P(startable)", "P(elite)", "P(useful)", "Value gap", "Value gap (cohort)", "Eligible", "Primary engine", "Projection sentence",
+            "Top drivers", "Rationale", "Floor", "Expected", "Ceiling", "Projects (2026)",
+            "P(startable)", "P(elite)", "P(useful)", "Value gap", "Eligible", "Primary engine", "Low-octane offense", "Projection sentence",
         ]
         rows = [
             [
@@ -1272,9 +1368,11 @@ def write_board(veteran_board: pd.DataFrame, rookie_board: pd.DataFrame) -> None
                 row["base_rate_multiple"], row["probability_calibrated_raw"], row["raw_score"],
                 row["expected_rank_delta"], row["consensus_ecr_pos_rank"], row["sleeper_adp_pos_rank"],
                 row["adp_gap"], row["implied_pts"], row["edge"], row["availability"], row["shap_top3"], row["rationale"],
-                row["floor_ppg"], row["expected_ppg"], row["ceiling_ppg"], row["cohort_rank"], row["predicted_finish_rank"],
-                row["p_startable"], row["p_elite"], row["p_useful"], row["value_gap_typical"], row["value_gap"],
-                row["breakout_eligible"], row["primary_engine"], row["projection_sentence"],
+                row["floor_ppg"], row["expected_ppg"], row["ceiling_ppg"], row["cohort_rank"],
+                row["p_startable"], row["p_elite"], row["p_useful"], row["value_gap"],
+                row["breakout_eligible"], row["primary_engine"],
+                f"Low-octane offense ({row['low_octane_source']})" if row.get("low_octane_offense") else "",
+                row["projection_sentence"],
             ]
             for _, row in sub.iterrows()
         ]
