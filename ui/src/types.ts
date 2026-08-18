@@ -61,6 +61,8 @@ export interface BoardRow {
   vgc: number | null;
   aps: boolean | null;
   psent: string | null;
+  /** v2.5 roster-situation lines: arrivals, departures w/ vacated usage+TDs, competition, pecking order. */
+  sit?: string[] | null;
 }
 
 export interface FeatureEntry {

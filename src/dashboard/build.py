@@ -224,7 +224,7 @@ def load_board(crosswalk_map: dict[tuple[str, str], str] | None = None) -> tuple
     return df, warnings
 
 
-def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
+def board_rows(board: pd.DataFrame, ecr_by_key: dict, situations: dict | None = None) -> list[dict]:
     rows = []
     for _, r in board.iterrows():
         drift = ecr_by_key.get(r["key"])
@@ -297,6 +297,10 @@ def board_rows(board: pd.DataFrame, ecr_by_key: dict) -> list[dict]:
                 # than it is). Presentation/risk-flag only, never a model input.
                 "loc": bool(r["low_octane_offense"]) if pd.notna(r.get("low_octane_offense")) else False,
                 "locsrc": r["low_octane_source"] if pd.notna(r.get("low_octane_source")) else None,
+                # v2.5: plain-English roster-situation lines (src.dashboard.situation) --
+                # arrivals, named departures with vacated usage/TDs, new competition,
+                # team pecking order. Presentation only, never a model input.
+                "sit": (situations or {}).get(r["key"]),
             }
         )
     return rows
@@ -781,7 +785,10 @@ def assemble_payload() -> tuple[dict, dict]:
     positions_view = build_positions_view(board, base_rates)
     meta = build_meta(board, bundles, ecr_report)
 
-    rows = board_rows(board, ecr_key)
+    from src.dashboard.situation import build_situations
+
+    situations = build_situations(board)
+    rows = board_rows(board, ecr_key, situations)
 
     payload = {
         "meta": meta,

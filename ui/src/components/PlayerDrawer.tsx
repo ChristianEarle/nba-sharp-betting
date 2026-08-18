@@ -84,6 +84,17 @@ export function PlayerDrawer({ row, features, onClose }: Props) {
           {row.seg && <OutcomeBar r={row} />}
           {row.seg && <LadderWords r={row} />}
 
+          {row.sit && row.sit.length > 0 && (
+            <div className="why">
+              <span className="lbl">The situation</span>
+              <ul className="sit-list">
+                {row.sit.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {row.s && (
             <div className="why">
               <span className="lbl">What's driving the call</span>
