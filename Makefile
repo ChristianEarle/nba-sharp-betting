@@ -1,4 +1,4 @@
-.PHONY: refresh retrain test board
+.PHONY: refresh retrain test board dashboard dashboard-build
 
 # All targets assume `uv sync --extra dev` has already been run once; see README Setup.
 
@@ -59,3 +59,20 @@ test:
 board:
 	@echo ">> board: scoring outputs/breakout_board_2026.{csv,md} from existing data + bundles"
 	uv run python -m src.inference.board_2026
+
+# Dashboard build only: assembles outputs/dashboard/index.html (single-file,
+# all data embedded) from whatever board/model/data artifacts already exist
+# on disk. No data pull, no retraining, no server -- use this if you just
+# want the file regenerated (e.g. before committing a data refresh) without
+# also starting `python -m http.server`.
+dashboard-build:
+	@echo ">> dashboard-build: assembling outputs/dashboard/index.html"
+	uv run python -m src.dashboard.build
+
+# Full dashboard: build, then serve it locally. outputs/dashboard/ is
+# gitignored (regenerable, like every other outputs/* artifact except the
+# checked-in board CSV/MD) -- this module (src/dashboard/build.py) is the
+# actual deliverable.
+dashboard: dashboard-build
+	@echo ">> dashboard: serving outputs/dashboard/ at http://localhost:8787"
+	uv run python -m http.server 8787 -d outputs/dashboard

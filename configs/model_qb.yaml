@@ -9,10 +9,20 @@
 
 seed: 42
 
+# v1.7 Step 1 (proxy-era sensitivity, src/models/proxy_sensitivity.py,
+# outputs/proxy_sensitivity.md): the decision rule (choose the real-market-only
+# 2020+ pool iff its holdout top-10 precision >= the full pool's AND its holdout
+# PR-AUC >= the full pool's - 0.02) did NOT favor it for QB -- kept on the
+# full 2014-2025 pool (train_season_start left at its default, cv.TRAIN_START_SEASON).
+
 optuna:
   classifier_trials: 60 # per model type (LGBM, XGB), on the 4 validation folds
   regression_trials: 30 # per model type (LGBM, XGB) — fewer, per the brief
   tiny_trials: 5 # used by tests/test_models_positions.py; keeps CI fast
+  seeds: [42, 1337, 2024] # v1.7 seed ensemble: LGBM+XGB tuned/OOF'd once per seed,
+    # raw score = mean of every seed's blended score (src.models.train's
+    # run_full_pipeline ensemble mode). The base `seed` above is always kept as
+    # part of this list for legacy single-model bundle keys (see train.py).
 
 # Curated subset for the L2 logistic head. Deliberately small and
 # low-null — logistic regression has no native handling of missing

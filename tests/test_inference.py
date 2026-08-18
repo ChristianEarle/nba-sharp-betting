@@ -97,6 +97,9 @@ REQUIRED_BOARD_COLUMNS = [
     "pos",
     "team",
     "probability",
+    "probability_calibrated_raw",
+    "tier",
+    "base_rate_multiple",
     "raw_score",
     "probability_saturated",
     "expected_rank_delta",
@@ -123,11 +126,12 @@ def test_board_required_columns_present() -> None:
 def test_board_probabilities_in_unit_interval() -> None:
     """`probability_heuristic` (rookies) is a plain, uncapped [0, 1] probability.
 
-    `probability` (veterans) is clamped to [board_2026.PROB_DISPLAY_LO,
-    board_2026.PROB_DISPLAY_HI] for display -- see board_2026's module
-    docstring ("Displayed-probability clamp") for why: isotonic
-    calibration saturates to an exact 0/1 in terminal OOF buckets at this
-    sample size, which reads as false certainty and collapses ordering.
+    `probability` (veterans, v1.7) is the base-rate-renormalized display value:
+    strictly positive, capped at ``board_2026.PROB_DISPLAY_CAP`` (0.97) -- see
+    board_2026's module docstring ("v1.7: base-rate renormalization") for why a
+    per-position rescale replaces the old fixed [0.01, 0.95] clamp.
+    `probability_calibrated_raw` (pre-rescale, Platt-calibrated) still carries the
+    old clamp range, since that column is untouched by the position-level rescale.
     """
     df = _board_df()
 
@@ -136,48 +140,86 @@ def test_board_probabilities_in_unit_interval() -> None:
 
     prob_vals = df["probability"].dropna()
     assert not prob_vals.empty
-    assert (prob_vals >= board_2026.PROB_DISPLAY_LO - 1e-9).all() and (prob_vals <= board_2026.PROB_DISPLAY_HI + 1e-9).all(), (
-        f"probability: values outside the display clamp [{board_2026.PROB_DISPLAY_LO}, {board_2026.PROB_DISPLAY_HI}]"
+    assert (prob_vals > 0).all() and (prob_vals <= board_2026.PROB_DISPLAY_CAP + 1e-9).all(), (
+        f"probability: values outside (0, {board_2026.PROB_DISPLAY_CAP}]"
+    )
+
+    raw_vals = df["probability_calibrated_raw"].dropna()
+    assert not raw_vals.empty
+    assert (raw_vals >= board_2026.PROB_DISPLAY_LO - 1e-9).all() and (raw_vals <= board_2026.PROB_DISPLAY_HI + 1e-9).all(), (
+        f"probability_calibrated_raw: values outside the display clamp [{board_2026.PROB_DISPLAY_LO}, {board_2026.PROB_DISPLAY_HI}]"
     )
 
 
-def test_board_saturated_rows_flagged_and_ordered_by_raw_score() -> None:
-    """Every probability_saturated==1 row hit the display clamp boundary (0.01 or 0.95),
+def test_board_displayed_ranking_matches_raw_score_ranking() -> None:
+    """v1.7: Platt calibration is strictly monotone and the per-position renormalization
 
-    and within a tied probability bucket, raw_score gives a strict-enough ordering to
-    break the tie (verified on this build's actual saturated QB/TE clusters).
+    scale is a single positive constant, so within each position the displayed
+    `probability` must rank identically to `raw_score` (the pre-calibration ensemble
+    blend score) -- see board_2026's module docstring.
+    """
+    df = _board_df()
+    veterans = df[df["section"] == "veteran"]
+    for pos, group in veterans.groupby("pos"):
+        by_prob = group.sort_values(["probability", "raw_score"], ascending=[False, False])["player_name"].tolist()
+        by_raw = group.sort_values("raw_score", ascending=False)["player_name"].tolist()
+        assert by_prob == by_raw, f"{pos}: displayed probability ranking does not match raw_score ranking"
+
+
+def test_board_saturated_rows_flagged_and_ordered_by_raw_score() -> None:
+    """Every probability_saturated==1 row hit the pre-rescale display clamp boundary
+
+    (0.01 or 0.95, on `probability_calibrated_raw`), and within a tied raw-calibrated
+    bucket, raw_score gives a strict-enough ordering to break the tie.
     """
     df = _board_df()
     veterans = df[df["section"] == "veteran"]
     saturated = veterans[veterans["probability_saturated"] == 1]
     if saturated.empty:
-        pytest.skip("no saturated rows on this build's board (isotonic didn't hit a terminal bucket)")
+        pytest.skip("no saturated rows on this build's board (Platt didn't hit a terminal clamp bucket)")
 
-    assert set(saturated["probability"].round(2).unique()) <= {board_2026.PROB_DISPLAY_LO, board_2026.PROB_DISPLAY_HI}
+    assert set(saturated["probability_calibrated_raw"].round(2).unique()) <= {board_2026.PROB_DISPLAY_LO, board_2026.PROB_DISPLAY_HI}
 
-    for (pos, prob), group in veterans.groupby(["pos", "probability"]):
+    for (pos, prob), group in veterans.groupby(["pos", "probability_calibrated_raw"]):
         if len(group) > 1:
             assert group["raw_score"].nunique() > 1, (
-                f"{pos} probability={prob}: {len(group)} tied rows share an identical raw_score too -- "
+                f"{pos} probability_calibrated_raw={prob}: {len(group)} tied rows share an identical raw_score too -- "
                 "ordering among them is arbitrary"
             )
 
 
-def test_board_has_zero_saturated_rows_v1_5() -> None:
-    """v1.5: src.inference.board_2026 scores off train.SmoothedIsotonic (never exactly 0/1
+def test_board_has_zero_saturated_rows_v1_7() -> None:
+    """v1.7: src.inference.board_2026 scores off train.fit_platt (a sigmoid, which can only
 
-    on the pooled OOF it was fit on -- see tests/test_models_positions.py's
-    test_smoothed_calibrator_output_strictly_inside_unit_interval), so the board's
-    probability_saturated count should be exactly 0 -- a real assertion, not the general
-    robustness check above (which intentionally still tolerates future saturation and
-    just checks it's handled correctly if it ever reappears).
+    output an exact 0.0/1.0 in the limit -- effectively never at real floating-point raw
+    scores), so the board's probability_saturated count should be exactly 0.
     """
     df = _board_df()
     veterans = df[df["section"] == "veteran"]
     if veterans.empty:
         pytest.skip("no veteran rows on the board")
     n_saturated = int(veterans["probability_saturated"].sum())
-    assert n_saturated == 0, f"expected 0 saturated veteran rows with SmoothedIsotonic, got {n_saturated}"
+    assert n_saturated == 0, f"expected 0 saturated veteran rows with Platt calibration, got {n_saturated}"
+
+
+def test_board_displayed_probability_sum_near_historical_mean_breakouts() -> None:
+    """v1.7 renormalization check: each position's sum(displayed probability) should be
+
+    within +/-20% of that position's historical mean per-season breakout count -- the
+    whole point of the rescale (see board_2026.attach_renormalized_probability).
+    """
+    df = _board_df()
+    veterans = df[df["section"] == "veteran"]
+    if veterans.empty:
+        pytest.skip("no veteran rows on the board")
+    mean_breakouts = board_2026.historical_mean_breakouts_by_position()
+    for pos, group in veterans.groupby("pos"):
+        target = mean_breakouts.get(pos)
+        if target is None or target <= 0:
+            continue
+        total = group["probability"].sum()
+        lo, hi = target * 0.8, target * 1.2
+        assert lo <= total <= hi, f"{pos}: sum(displayed probability)={total:.2f} not within +/-20% of historical mean {target:.2f}"
 
 
 def test_board_rookies_are_flagged_and_separate_from_veterans() -> None:
