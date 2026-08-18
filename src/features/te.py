@@ -49,6 +49,12 @@ unchanged from ``src.features.wr`` (TE reuses WR's ``BASE_METRICS`` and
 ``build_raw_stat_table`` verbatim -- see the module-level import above),
 so no TE-specific pbp wiring was needed beyond passing ``pbp`` through.
 
+v2.4 addition (team-change/vacancy, gated -- src.models.vacancy_gate): qb_continuity,
+vacated_td_share, vacated_goal_line_carry_share, max_single_vacated_target_share,
+max_single_vacated_carry_share -- identical wiring to src.features.wr (see that
+module's own v2.4 docstring paragraph); reused via
+src.features.shared.attach_wr_te_rb_vacancy_features.
+
 Skipped by design (documented per the brief, not implemented here): depth
 chart position (no 2025 depth-chart snapshot available), offensive-line
 continuity (no source in data/raw).
@@ -105,6 +111,7 @@ _OUT_COLUMNS = (
         "young_stayer",
         "moved_into_vacancy",
     ]
+    + sh.VACANCY_COLUMNS_WR_TE_RB
 )
 
 
@@ -186,6 +193,11 @@ def build_features_te(
     out = sh.attach_path_to_volume(out, "vacated_target_share")
     out = sh.attach_young_stayer(out)
     out = sh.attach_moved_into_vacancy(out, "vacated_target_share")
+
+    # v2.4: QB continuity + TD/goal-line vacancy + star-departure columns -- see
+    # src.features.shared.attach_wr_te_rb_vacancy_features's docstring. Gated
+    # (src.models.vacancy_gate) before shipping in any position's actual model.
+    out = sh.attach_wr_te_rb_vacancy_features(out, reg, season_team, pbp)
 
     out = out.with_columns(pl.min_horizontal(pl.col("years_exp"), pl.lit(10)).alias("year_in_league"))
     out = sh.add_covid_flag(out)

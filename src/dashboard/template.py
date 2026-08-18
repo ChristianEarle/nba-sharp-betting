@@ -375,8 +375,8 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
         <div><b>Verdict</b>That percentage as a multiple of a normal late pick's odds at his position: <b>Elite target</b> (8x or more), <b>Strong swing</b> (4&ndash;8x), <b>Worth a flier</b> (2&ndash;4x), <b>Long shot</b> (under 2x).</div>
         <div><b>Market ▲ / ▼</b>How his preseason ranking has moved across the summer's weekly consensus snapshots. ▲ = the market is warming up on him since June; ▼ = it's cooling.</div>
         <div><b>Breakout Hunt vs Full Projections</b>Breakout Hunt only shows players who are still cheap enough to qualify as a breakout candidate at all, ranked by breakout odds. Full Projections shows every scored veteran, ranked by his projected per-game scoring, with a floor&ndash;expected&ndash;ceiling range bar and a "already priced as a starter" badge on anyone too expensive to be a breakout by definition.</div>
-        <div><b>Two ranks, not one</b>Every projection carries two different ranks: <b>where he stacks up against this year's players</b> at his position (the "Projects PosN of 2026" line &mdash; the same field the market's own consensus ranking covers), and <b>what a typical season with his median projection would have finished historically</b> (the "typical finish" line). A median projection can't reach an all-time RB1's extreme season, so even this year's #1 projected back can read as a "typical RB10" &mdash; that's not a contradiction, just two different questions about the same number.</div>
-        <div><b>Value gap</b>Consensus market rank minus the model's typical-finish rank &mdash; positive means the market has him going later than a season like his median projection has historically finished. (The tested-and-validated version of this gap; see Method.)</div>
+        <div><b>Projects PosN of 2026</b>Where he stacks up against every OTHER player scored at his position this year &mdash; the same field the market's own consensus ranking covers. Peer comparison only: this board doesn't show a "typical historical season" mapping anywhere, by design.</div>
+        <div><b>Value gap</b>Consensus market rank minus his peer rank above &mdash; positive means the market has him going later than his projection stacks up against this year's field. (See Method for the measured tradeoff against the alternative, historically-validated version of this gap.)</div>
         <div><b>Outcome bar (tap a row to see the words)</b>Four honest, non-overlapping shares of a player's season: top-5 finish, weekly-starter finish, still-useful bench/flex finish, and bust &mdash; they always add up to 100%.</div>
         <div><b>▲ and ▼ inside a row (tap to open)</b>Why the model thinks so. ▲ = a fact working in his favor (lots of catches last year, new team, cheap price). ▼ = a fact working against him.</div>
         <div><b>Numbers panel (inside a row)</b>Tap "Show the numbers" for the raw feature values and percentiles behind the call, plus the full market-drift chart &mdash; the detail underneath the plain-language verdict.</div>
@@ -414,6 +414,15 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       const arrow = dir ? '<span class="dir ' + (up ? "up" : "dn") + '" aria-hidden="true">' + (up ? "▲" : "▼") + "</span>" : "";
       return '<span class="drv">' + arrow + esc(label) + "</span>";
     }).join("");
+  }
+
+  // v2.4: low-octane-offense risk flag chip (r.loc/r.locsrc, server-computed --
+  // src.inference.board_2026.compute_low_octane_flags). Reuses the same ".drv" chip
+  // style as the SHAP driver chips, rendered alongside them in both lenses (Breakout
+  // Hunt and Full Projections share the same row template -- see renderBoard below).
+  function lowOctaneChipHTML(r) {
+    if (!r.loc) return "";
+    return '<span class="drv risk"><span class="dir dn" aria-hidden="true">▼</span>Low-octane offense (' + esc(r.locsrc || "est.") + ")</span>";
   }
 
   function costCell(r) {
@@ -594,7 +603,7 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
           projectionSentenceHTML(r) +
           (r.r ? '<div class="say">' + esc(r.r) + "</div>" : (!r.psent && !r.aps ? '<div class="say">' + esc(r.n) + " — no notes recorded.</div>" : "")) +
           (r.seg ? outcomeBarHTML(r) : "") + (r.seg ? ladderWordsHTML(r) : "") +
-          (r.s ? '<div class="why"><span class="lbl">What&rsquo;s driving the call</span>' + driverChips(r.s, 9) + "</div>" : "") +
+          (r.s || r.loc ? '<div class="why"><span class="lbl">What&rsquo;s driving the call</span>' + driverChips(r.s, 9) + lowOctaneChipHTML(r) + "</div>" : "") +
           (!r.rk && r.d != null ? '<div class="also"><span class="lbl">Second opinion</span>A separate model predicts his finish vs his price: ' +
             (r.d > 2 ? "beats his price by ~" + Math.round(r.d) + " spots — the two models agree." :
              r.d < -2 ? "finishes ~" + Math.abs(Math.round(r.d)) + " spots below the hype — the two models disagree, so treat this pick with extra caution." :
@@ -765,6 +774,9 @@ PAGE_TEMPLATE = r"""<meta charset="utf-8">
       '</ul>' +
       '<h2>Vegas lines: tested, not used</h2>' +
       '<p>Team-level Vegas win totals and implied scoring were tried as model inputs, twice, across all four positions. Neither pass improved holdout accuracy enough to justify keeping — the market’s own preseason draft price already contains most of what the betting lines would have added. The board still shows Vegas implied points where available, purely as a manual sanity-check column, never as a model input.</p>' +
+      '<p>One thing Vegas <i>is</i> used for: a "Low-octane offense" risk flag on the bottom five preseason-implied-scoring teams (or, until a fresh preseason snapshot exists, the bottom five teams by last season’s actual points per game — clearly labeled "est." wherever it shows up instead of "Vegas"). Measured 2020–2025: players on those bottom-five offenses turned into a real weekly starter only 6.7% of the time, vs 33.3% on the top-five offenses — a real gap, but read it as a risk flag, not a verdict: good players tend to play for (or make) good offenses, so this doesn’t prove any one player is a bad bet, and it still isn’t fed into either model.</p>' +
+      '<h2>One rank, not two</h2>' +
+      '<p>Every projection shows exactly one rank: where a player stacks up against every OTHER player scored at his position this year — the same field the market’s own consensus ranking covers. An earlier version of this board also showed a second, historical "typical finish" rank (what a typical past season with the same median projection would have finished); it’s dropped from every table and sentence here by design, so you’re only ever comparing a player to this year’s field, not to a different season’s history. The Value gap column follows the same rule: it’s the market’s rank minus THIS peer rank, not the historical one — see the README for the measured tradeoff between the two versions of that gap (they grade almost identically; this is a display preference, not a correctness fix).</p>' +
       '<h2>The rookie section is a different, weaker model</h2>' +
       '<p>Rookies have no NFL history to build the real feature set from, so they’re scored by a much simpler heuristic (draft position, landing-spot opportunity) on its own probability scale — never comparable number-for-number to the veteran percentages above it. Treat rookie calls as tie-breakers on your last couple of picks, not as strong signals.</p>' +
       '</div>';

@@ -1276,6 +1276,97 @@ independent re-grades of the same frozen holdout board produce identical spreads
 tercile tables) — matching this repo's existing "scoring a frozen bundle is a pure
 function call" determinism guarantee for everything else in the audit.
 
+## v2.4: team-change/vacancy features + peer-rank-only display + low-octane flag
+
+**New roster-diff-derived features** (`src/features/shared.py`, wired into
+`src/features/{wr,rb,te,qb}.py`), all built purely from `season_roster_team` (the
+Week-1 season-N roster) vs N-1 usage — no manual per-team lists anywhere:
+
+- `qb_continuity` (WR/TE/RB rows only — meaningless for the thrower himself): share of
+  the team's N-1 pass attempts thrown by QBs still on that team's Week-1 season-N
+  roster. A new-starting-QB situation reads low.
+- `vacated_td_share` (every position, including QB): share of the team's N-1 offensive
+  TDs (rushing + receiving) belonging to players absent from the Week-1 season-N
+  roster.
+- `vacated_goal_line_carry_share` (WR/TE/RB — cheap to add everywhere once the pbp
+  cache is pulled): departed players' share of the team's N-1 goal-line
+  (`yardline_100<=5`) carries — e.g. a goal-line back departing frees up short-yardage
+  carries for whoever's left in the backfield.
+- `max_single_vacated_target_share` / `max_single_vacated_carry_share` (WR/TE/RB): the
+  single largest departed player's own share (vs `vacated_shares`' population SUM) —
+  distinguishes a star departure from diffuse committee churn.
+
+**Gates (binding, per position).** Every new column starts EXCLUDED from every
+position's shipped model (`configs/model_{pos}.yaml`'s `excluded_features` /
+`excluded_features_quantile`) until a frozen-hyperparameter retrain proves it doesn't
+regress — same discipline v2.2's efficiency-proxy gate established, extended to two
+gates now (classifier AND, new this session, quantile):
+
+- **Classifier gate** (`src/models/vacancy_gate.py`, reusing
+  `src.models.efficiency_gate`'s engine almost entirely): KEEP iff pooled 2024+2025
+  holdout top-10 precision doesn't regress AND PR-AUC improves or regresses by at most
+  0.01. Result this session: **RB KEEP** (PR-AUC 0.177 → 0.180); WR/TE/QB REJECT
+  (PR-AUC regressed beyond tolerance in all three). See `outputs/vacancy_gate.md`.
+- **Quantile gate** (new this session — the quantile head had no capacity gate before):
+  KEEP iff holdout Spearman(q50, realized) doesn't regress by more than 0.01 AND
+  pinball(q50) improves or stays within 1%. Result: **WR KEEP** (pinball 1.327 →
+  1.296), **RB KEEP** (Spearman held at 0.738); TE/QB REJECT. See
+  `outputs/vacancy_gate_quantile.md`. `configs/model_{pos}.yaml` gained a SEPARATE
+  `excluded_features_quantile` key for this — the two gates can legitimately disagree
+  on the same column (they measure genuinely different things), so a single shared
+  exclusion list would have forced them to agree.
+
+**Peer-rank-only display (user preference, this session — "I don't care how they
+historically finish, I want them compared to their peers").** Every user-facing
+surface now shows `cohort_rank`/`value_gap` (the peer-comparison rank/gap, v2.3) EXCLUSIVELY:
+
+- The projection sentence drops the "a season like his median projection historically
+  finishes ~PosN" clause entirely.
+- The board `.md` tables drop the **Typical finish** column and the duplicate **Value
+  gap (cohort)** column — there is now exactly one **Value gap** column, and it's
+  `value_gap` (cohort-based).
+- The dashboard shows `cohort_rank` as the only rank (`predicted_finish_rank` is no
+  longer sent to the dashboard payload at all) and colors/sorts by `value_gap`
+  (cohort-based) instead of `value_gap_typical`.
+- `predicted_finish_rank`/`value_gap_typical` are NOT removed from the pipeline — they
+  stay on the board CSV as analyst-only columns, and the threshold-curve/outcome-ladder
+  machinery underneath both ranks is unchanged (the ladder derivation still needs
+  `predicted_finish_rank` internally).
+
+**This is an explicit tradeoff, not a re-measurement.** The v2.3 audit table above
+still reads the same way: `value_gap_typical` (+33.2pt tercile spread) narrowly beats
+`value_gap` (+30.0pt) as a REALIZED-OUTCOME sorter. This session's change does not
+dispute that measurement — both land in the same "+30pt-ish, clearly real" territory,
+close enough that the user's explicit framing preference (peer comparison, not a
+historical-typical-season mapping) is allowed to decide the DISPLAY/SORT default
+without waiting for a rerun to flip the winner. `outputs/holdout_board_audit.md`'s
+"Metric decision" subsection now states this override explicitly, right below the
+measured winner, so nobody mistakes the display change for a claim that cohort-based
+grades better.
+
+**Low-octane-offense risk flag** (`src/inference/board_2026.compute_low_octane_flags`).
+Measured this session, 2020-2025 pooled: players on the bottom-5 preseason-implied-
+scoring offenses turned into a real weekly starter only 6.7% of the time, vs 33.3% on
+the top-5 — beat-price rates stayed flat (~48-54%) across both groups, so this reads as
+a RISK flag on season-long ceiling, not an edge the models were missing (the models
+already rejected Vegas team features twice on holdout accuracy grounds — see "Vegas
+lines: tested, not used" above). **Never a model input** — presentation/risk-flag only.
+Two sources, clearly labeled wherever the flag shows up:
+
+- **Source A (preferred):** season-2026 preseason team lines
+  (`data/external/odds_api/team_lines.parquet`), if present — bottom 5 by implied
+  points-per-game, chip reads "Low-octane offense (Vegas)".
+- **Source B (fallback — current repo state, no 2026 odds snapshot exists yet):**
+  bottom 5 teams by season-2025 ACTUAL points-per-game, computed directly from
+  `schedules.parquet`'s own REG scores — chip reads "Low-octane offense (est.)" so it's
+  never mistaken for a live market read.
+
+The board CSV gains `low_octane_offense` (0/1) and `low_octane_source` ("Vegas" or
+"est."); the dashboard renders a chip in both lenses (Breakout Hunt and Full
+Projections share the same row template). **Confound worth stating alongside the
+stat:** good players tend to play for (or make) good offenses, so this flag is
+context, not proof that any one flagged player is a bad bet.
+
 ## Known Limitations
 
 - **Roughly 4–5k usable training rows** are expected across the whole

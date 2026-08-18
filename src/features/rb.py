@@ -69,6 +69,16 @@ his N-1 primary team's own carries inside that yardline threshold — see
 false in configs/data.yaml, and genuinely nonexistent for the 2026
 season).
 
+v2.4 addition (team-change/vacancy, gated -- src.models.vacancy_gate): qb_continuity
+(share of the team's N-1 pass attempts thrown by QBs still on its Week-1 season-N
+roster), vacated_td_share (share of the team's N-1 offensive TDs belonging to
+departed players), vacated_goal_line_carry_share (a departed back's share of the
+team's N-1 goal-line (yardline_100<=5) carries -- e.g. a goal-line back leaving frees
+up short-yardage carries for whoever's left), and max_single_vacated_target_share/
+max_single_vacated_carry_share (the single largest departed player's own share, vs
+vacated_shares' population SUM -- star departure vs diffuse churn). See
+src.features.shared's docstrings above each builder.
+
 Skipped by design (documented per the brief, not implemented here): depth
 chart position (no 2025 depth-chart snapshot available), offensive-line
 continuity (no source in data/raw).
@@ -165,6 +175,7 @@ _OUT_COLUMNS = (
         "young_stayer",
         "moved_into_vacancy",
     ]
+    + sh.VACANCY_COLUMNS_WR_TE_RB
 )
 
 
@@ -442,6 +453,11 @@ def build_features_rb(
     out = sh.attach_path_to_volume(out, "vacated_carry_share")
     out = sh.attach_young_stayer(out)
     out = sh.attach_moved_into_vacancy(out, "vacated_carry_share")
+
+    # v2.4: QB continuity + TD/goal-line vacancy + star-departure columns -- see
+    # src.features.shared.attach_wr_te_rb_vacancy_features's docstring. Gated
+    # (src.models.vacancy_gate) before shipping in any position's actual model.
+    out = sh.attach_wr_te_rb_vacancy_features(out, reg, season_team, pbp)
 
     out = out.with_columns(pl.min_horizontal(pl.col("years_exp"), pl.lit(10)).alias("year_in_league"))
     out = sh.add_covid_flag(out)

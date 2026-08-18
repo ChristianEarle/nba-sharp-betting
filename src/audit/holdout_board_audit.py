@@ -834,6 +834,22 @@ def write_report(a: dict, report_path: Path = REPORT_PATH) -> None:
             "not a claim that the new gap is a better signal."
         )
     lines.append("")
+    lines.append(
+        "**Explicit user-preference override (this session):** regardless of which metric wins the measurement above, "
+        "the board's DISPLAY and SORT default for the Value gap column is now `value_gap` (cohort-based) everywhere -- "
+        "`src.inference.board_2026.write_board`'s tables, the dashboard's `vg` field, and every projection sentence. This "
+        "is a direct user request (\"I don't care how they historically finish, I want them compared to their peers\"), "
+        "not a re-litigation of the measurement above: at the numbers this audit run actually produced "
+        f"({cs_txt} cohort-based vs {ts_txt} typical-based -- both land around the same +30pt neighborhood the brief's "
+        "own framing describes), the two sorters are close enough that a user's explicit framing preference is allowed "
+        "to decide it. `predicted_finish_rank`/`value_gap_typical` are NOT removed from the pipeline -- they remain on "
+        "the board CSV for analysts who want the metric this audit's own tercile-spread test currently prefers, and the "
+        "threshold-curve/outcome-ladder machinery underneath both ranks (`src.inference.projections`) is unchanged, "
+        "since the ladder derivation still needs `predicted_finish_rank` internally. If a future audit run shows the "
+        "gap between the two sorters widening meaningfully, that would be the trigger to revisit this override -- not "
+        "user preference alone."
+    )
+    lines.append("")
 
     lines.append("## 4. Named receipts (top Breakout Hunt picks vs what happened)")
     lines.append("")

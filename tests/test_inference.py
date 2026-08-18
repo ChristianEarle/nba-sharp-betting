@@ -116,6 +116,9 @@ REQUIRED_BOARD_COLUMNS = [
     "section",
     "probability_heuristic",
     "broke_out_last_season",
+    # v2.4: low-octane-offense risk flag (see board_2026.compute_low_octane_flags).
+    "low_octane_offense",
+    "low_octane_source",
 ]
 
 
@@ -604,3 +607,147 @@ def test_broke_out_last_season_rookies_never_flagged() -> None:
     if rookies.empty:
         pytest.skip("no rookie rows on the board")
     assert not rookies["broke_out_last_season"].any(), "a 2026 rookie cannot have broken out in 2025"
+
+
+# --------------------------------------------------------------------------
+# v2.4: low-octane-offense risk flag (board_2026.compute_low_octane_flags)
+# --------------------------------------------------------------------------
+
+
+def _skip_if_schedules_missing() -> None:
+    if not board_2026.sh.PATHS["schedules"].exists():
+        pytest.skip("schedules.parquet not built")
+
+
+def test_compute_low_octane_flags_flags_exactly_five_teams_source_b() -> None:
+    """Source B (schedules-derived actual PPG) fallback -- the current repo state, since
+
+    no season-2026 odds_api snapshot exists yet (see the module docstring). Exactly
+    LOW_OCTANE_N (5) teams must read low_octane_offense==1, and every other resolvable
+    team must read 0 (never null/missing after the fallback), source labeled "est.".
+    """
+    _skip_if_schedules_missing()
+    schedules = pl.read_parquet(board_2026.sh.PATHS["schedules"])
+    out = board_2026.compute_low_octane_flags(schedules)
+    assert (out["low_octane_source"] == "est.").all(), "Source B fallback must label every row 'est.', never 'Vegas'"
+    assert int(out["low_octane_offense"].sum()) == board_2026.LOW_OCTANE_N
+    assert set(out["low_octane_offense"].unique()) <= {0, 1}
+
+
+def test_compute_low_octane_flags_source_a_used_when_2026_vegas_lines_present(monkeypatch, tmp_path) -> None:
+    """Source A (Vegas preseason team lines) takes priority over Source B whenever the
+
+    repo actually has season-``SEASON`` team_lines rows for at least LOW_OCTANE_N teams --
+    synthesized here since the real repo has none yet (see the module docstring's "current
+    repo state" note). Exactly LOW_OCTANE_N teams must be flagged, source labeled "Vegas".
+    """
+    _skip_if_schedules_missing()
+    from src.ingest import vegas as vg_ingest
+
+    # 8 REAL team full names (vegas.TEAM_NAME_TO_CODE only accepts real NFL franchise
+    # names, never raises on an unmapped one), synthetic spreads/totals engineered so
+    # implied_ppg is strictly increasing team-to-team -- the bottom 5 (by construction)
+    # are the first 5 in this list.
+    teams = [
+        "Arizona Cardinals", "Atlanta Falcons", "Baltimore Ravens", "Buffalo Bills",
+        "Carolina Panthers", "Chicago Bears", "Cincinnati Bengals", "Cleveland Browns",
+    ]
+    codes = [vg_ingest.TEAM_NAME_TO_CODE[t] for t in teams]
+    rows = []
+    for i, t in enumerate(teams):
+        rows.append(
+            {
+                "season": board_2026.SEASON, "snapshot": "2026-08-01", "event_id": f"evt{i}",
+                "commence_time": "2026-09-07T00:00:00Z", "home_team": t, "away_team": teams[(i + 1) % len(teams)],
+                "home_ml": -110, "away_ml": -110, "home_spread": 0.0, "total": 30.0 + i,
+            }
+        )
+    fake_team_lines = pd.DataFrame(rows)
+    fake_path = tmp_path / "team_lines.parquet"
+    fake_team_lines.to_parquet(fake_path)
+
+    monkeypatch.setattr(vg_ingest, "TEAM_LINES_PATH", fake_path)
+    schedules = pl.read_parquet(board_2026.sh.PATHS["schedules"])
+    out = board_2026.compute_low_octane_flags(schedules)
+
+    assert (out["low_octane_source"] == "Vegas").all()
+    assert int(out["low_octane_offense"].sum()) == board_2026.LOW_OCTANE_N
+    assert set(out["team"]) == set(codes)
+
+    # Self-consistency (rather than hand-computing the round-robin implied_ppg average):
+    # the flagged set must be exactly the bottom LOW_OCTANE_N teams by the SAME
+    # build_vegas_team implied_ppg this function itself sorts on.
+    vt = vg_ingest.build_vegas_team(pl.from_pandas(fake_team_lines)).filter(pl.col("season") == board_2026.SEASON)
+    expected_bottom = set(vt.sort("implied_ppg").head(board_2026.LOW_OCTANE_N).get_column("team").to_list())
+    flagged = set(out.loc[out["low_octane_offense"] == 1, "team"])
+    assert flagged == expected_bottom, (flagged, expected_bottom)
+
+
+def test_low_octane_offense_flag_covers_exactly_five_teams_on_board() -> None:
+    """Every veteran board row's own low_octane_offense/low_octane_source, joined onto
+
+    the real board -- exactly LOW_OCTANE_N distinct TEAMS (not rows -- a flagged team can
+    have many players) should read low_octane_offense==1, and the source label must be
+    either "Vegas" or "est." (never "unknown" -- schedules.parquet always resolves every
+    real NFL team's actual-PPG fallback).
+    """
+    df = _board_df()
+    veterans = df[df["section"] == "veteran"]
+    if veterans.empty or "low_octane_offense" not in veterans.columns:
+        pytest.skip("no veteran rows / low_octane_offense not on the board CSV")
+    flagged_teams = set(veterans.loc[veterans["low_octane_offense"] == 1, "team"].dropna())
+    assert len(flagged_teams) == board_2026.LOW_OCTANE_N, flagged_teams
+    assert set(veterans["low_octane_source"].dropna().unique()) <= {"Vegas", "est.", "unknown"}
+
+
+# --------------------------------------------------------------------------
+# v2.4: peer-rank-only display -- the "typical finish" framing is dropped from every
+# user-facing sentence/table (board_2026.build_projection_sentence / write_board),
+# while predicted_finish_rank/value_gap_typical stay on the CSV for analysts.
+# --------------------------------------------------------------------------
+
+
+def test_projection_sentence_never_mentions_typical_finish() -> None:
+    row = pd.Series(
+        {
+            "expected_ppg": 15.7, "floor_ppg": 12.4, "ceiling_ppg": 20.4, "pos": "RB",
+            "value_gap": 6.0, "expectation_pos_rank": 8, "cohort_rank": 2, "season": 2026,
+            "predicted_finish_rank": 10, "p_startable": 0.74, "p_elite": 0.18,
+        }
+    )
+    sentence = board_2026.build_projection_sentence(row)
+    assert isinstance(sentence, str)
+    assert "historically finishes" not in sentence
+    assert "typical" not in sentence.lower()
+    assert "Projects RB2 of 2026" in sentence
+
+
+def test_board_csv_keeps_predicted_finish_rank_and_value_gap_typical_as_analyst_columns() -> None:
+    """Peer-rank-only display is a presentation change, not a data removal --
+
+    predicted_finish_rank/value_gap_typical must still be on the board CSV.
+    """
+    df = _board_df()
+    assert "predicted_finish_rank" in df.columns
+    assert "value_gap_typical" in df.columns
+    assert "cohort_rank" in df.columns
+    assert "value_gap" in df.columns
+
+
+def test_board_md_never_shows_typical_finish_column_or_label() -> None:
+    """No TABLE (a `|`-delimited row -- header or data) may carry a "Typical finish" or
+
+    "Value gap (cohort)" column; the module's own explanatory prose is allowed to
+    reference those retired column names by name when describing the change (see
+    write_board's peer-rank-only note), so this checks table rows specifically, not
+    every line in the file.
+    """
+    if not board_2026.BOARD_MD_PATH.exists():
+        pytest.skip(f"{board_2026.BOARD_MD_PATH.name} not built; run `python -m src.inference.board_2026`")
+    table_lines = [line for line in board_2026.BOARD_MD_PATH.read_text().splitlines() if line.startswith("|")]
+    assert table_lines, "no markdown table rows found at all -- board.md structure changed?"
+    assert not any("Typical finish" in line for line in table_lines)
+    assert not any("Value gap (cohort)" in line for line in table_lines)
+    # No player-detail sentence (the "say" line embedded in the Rationale/Projection
+    # sentence table cells) may carry the retired typical-finish clause either.
+    assert not any("historically finishes" in line for line in table_lines)

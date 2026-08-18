@@ -260,12 +260,20 @@ def bundle_already_promoted(bundle: dict, extra_cols: list[str]) -> bool:
 # --------------------------------------------------------------------------
 
 
-def metrics_table(holdout_df: pd.DataFrame, incumbent_score: np.ndarray, variant_score: np.ndarray) -> pd.DataFrame:
+def metrics_table(
+    holdout_df: pd.DataFrame, incumbent_score: np.ndarray, variant_score: np.ndarray, variant_name: str = "plus_efficiency"
+) -> pd.DataFrame:
+    """``variant_name`` (v2.4) lets a second gate module (``src.models.vacancy_gate``) reuse
+
+    this exact table-building logic with a different variant label (e.g. "plus_vacancy")
+    without duplicating it -- defaults to "plus_efficiency" so every pre-v2.4 caller
+    (this module's own ``run_position``, its tests) is unaffected.
+    """
     rows = []
     for season in list(HOLDOUT_SEASONS) + ["pooled"]:
         mask = (holdout_df["season"] == season) if season != "pooled" else pd.Series(True, index=holdout_df.index)
         y = holdout_df.loc[mask, "breakout"]
-        for name, score in (("incumbent", incumbent_score), ("plus_efficiency", variant_score)):
+        for name, score in (("incumbent", incumbent_score), (variant_name, variant_score)):
             s = pd.Series(score, index=holdout_df.index).loc[mask]
             rows.append(
                 {
@@ -276,16 +284,18 @@ def metrics_table(holdout_df: pd.DataFrame, incumbent_score: np.ndarray, variant
     return pd.DataFrame(rows)
 
 
-def gate_decision(table: pd.DataFrame) -> tuple[bool, str]:
+def gate_decision(table: pd.DataFrame, variant_name: str = "plus_efficiency") -> tuple[bool, str]:
     """KEEP iff pooled holdout top-10 precision does not regress AND PR-AUC either
 
     improves or regresses by at most PR_AUC_TOLERANCE. Returns (keep: bool, reason: str).
+    ``variant_name`` -- see ``metrics_table``'s docstring; same v2.4 reuse-by-parameter,
+    same "plus_efficiency" default.
     """
     pooled = table[table["season"] == "pooled"].set_index("variant")
     base_top10 = pooled.loc["incumbent", "top10_precision"]
-    var_top10 = pooled.loc["plus_efficiency", "top10_precision"]
+    var_top10 = pooled.loc[variant_name, "top10_precision"]
     base_prauc = pooled.loc["incumbent", "pr_auc"]
-    var_prauc = pooled.loc["plus_efficiency", "pr_auc"]
+    var_prauc = pooled.loc[variant_name, "pr_auc"]
 
     top10_ok = var_top10 >= base_top10
     prauc_ok = var_prauc >= base_prauc - PR_AUC_TOLERANCE
@@ -327,7 +337,17 @@ def promote_position(spec: train.PositionSpec, bundle: dict, df: pd.DataFrame, f
     """
     tree_cols = fitted["tree_cols"]
     logit_cols = bundle["logistic_feature_cols"]
-    folds = train.validation_folds()
+    # Bug fix (v2.4, surfaced by the vacancy gate's RB run -- see git history/session
+    # report): a position with a restricted train_season_start (RB's 2020+ real-market-
+    # only pool, configs/model_rb.yaml) has NO rows before that year in `df` at all,
+    # so an un-scoped validation_folds() (defaulting to TRAIN_START_SEASON=2014) hands
+    # logistic_oof a fold whose train_seasons include years the pool doesn't cover,
+    # producing an EMPTY train_df and crashing SimpleImputer on 0 samples. Every other
+    # call in this module already scopes this correctly (see fit_and_score_efficiency_variant/
+    # reconstruct_incumbent_score's own `train.validation_folds(train_start_season=...)`
+    # call, and run_position's identical one) -- this was the one straggler, unexercised
+    # until a position with both a restricted pool AND a real classifier-gate KEEP hit it.
+    folds = train.validation_folds(train_start_season=bundle["cfg"].get("train_season_start", train.TRAIN_START_SEASON))
     seed = bundle["seed"]
 
     logit_oof, logit_fold_metrics = train.logistic_oof(df, logit_cols, folds, bundle["logistic_C"], seed)
@@ -450,6 +470,31 @@ def add_to_excluded_features(config_path, new_cols: list[str]) -> None:
     config_path.write_text(text)
 
 
+def remove_from_excluded_features(config_path, cols: list[str]) -> None:
+    """A KEPT position's new columns are removed from configs/model_{pos}.yaml's
+
+    ``excluded_features`` list (v2.4 addition -- a KEEP gate decision that pre-populated
+    this list with a "start excluded until proven" default, as ``src.models.vacancy_gate``
+    does, must symmetrically clear it, or a FUTURE fresh Optuna retrain
+    (``python -m src.models.train {pos}``) would silently exclude columns the CURRENTLY
+    SHIPPED gate-promoted bundle already uses -- the exact staleness gap this module's own
+    docstring for ``add_to_excluded_features``/this config's own inline comments already
+    promise doesn't happen ("a promoted position has this list emptied by the experiment
+    run") but no code previously implemented for any caller that pre-populates the list.
+    A no-op for any column not currently listed (covers v2.2's own callers, which never
+    pre-populate -- nothing to remove there). Idempotent, order-preserving for the
+    survivors.
+    """
+    text = config_path.read_text()
+    m = re.search(r"excluded_features:\s*\[([^\]]*)\]", text)
+    assert m is not None, f"{config_path}: no `excluded_features: [...]` line found"
+    current = [c.strip() for c in m.group(1).split(",") if c.strip()]
+    remaining = [c for c in current if c not in cols]
+    new_line = f"excluded_features: [{', '.join(remaining)}]"
+    text = text[: m.start()] + new_line + text[m.end() :]
+    config_path.write_text(text)
+
+
 # --------------------------------------------------------------------------
 # outputs/model_{pos}_{report.md,metrics.json} for a KEPT (promoted) position
 # --------------------------------------------------------------------------
@@ -468,20 +513,28 @@ _GATE_BANNER_TEMPLATE = """> **v2.2 efficiency gate -- frozen-hyperparameter ret
 """
 
 
-def _gate_banner(pos: str, extra_cols: list[str], gate_table: pd.DataFrame, artifact_path) -> str:
+def _gate_banner(
+    pos: str, extra_cols: list[str], gate_table: pd.DataFrame, artifact_path,
+    *, variant_name: str = "plus_efficiency", banner_template: str = _GATE_BANNER_TEMPLATE,
+) -> str:
     pooled = gate_table[gate_table["season"] == "pooled"].set_index("variant")
     base_top10 = float(pooled.loc["incumbent", "top10_precision"])
-    var_top10 = float(pooled.loc["plus_efficiency", "top10_precision"])
+    var_top10 = float(pooled.loc[variant_name, "top10_precision"])
     base_prauc = float(pooled.loc["incumbent", "pr_auc"])
-    var_prauc = float(pooled.loc["plus_efficiency", "pr_auc"])
-    return _GATE_BANNER_TEMPLATE.format(
+    var_prauc = float(pooled.loc[variant_name, "pr_auc"])
+    return banner_template.format(
         pos=pos, extra_cols=extra_cols, base_top10=base_top10, var_top10=var_top10,
         prauc_verb="improved" if var_prauc >= base_prauc else f"regressed by <= {PR_AUC_TOLERANCE}",
         base_prauc=base_prauc, var_prauc=var_prauc, artifact_path=artifact_path,
     )
 
 
-def write_gate_outputs(spec: train.PositionSpec, result: dict, pos: str, extra_cols: list[str], gate_table: pd.DataFrame) -> dict:
+def write_gate_outputs(
+    spec: train.PositionSpec, result: dict, pos: str, extra_cols: list[str], gate_table: pd.DataFrame,
+    *, variant_name: str = "plus_efficiency", banner_template: str = _GATE_BANNER_TEMPLATE,
+    title_marker: str = "(v2.2 efficiency gate, frozen-hyperparameter retrain)",
+    metrics_key: str = "v2_2_efficiency_gate", metrics_note: str = "frozen-hyperparameter retrain via src.models.efficiency_gate -- see outputs/efficiency_gate.md",
+) -> dict:
     """Regenerate outputs/model_{pos}_{report.md,metrics.json} for a gate-KEPT position,
 
     describing the SHIPPED (promoted) bundle -- reuses ``train.generate_report``/
@@ -495,21 +548,22 @@ def write_gate_outputs(spec: train.PositionSpec, result: dict, pos: str, extra_c
     is exactly the staleness class ``vegas_experiment.promote_position`` left as a gap
     (never regenerated ``model_{pos}_report.md``/``metrics.json`` for a promoted
     position) -- not a precedent to repeat here.
+
+    ``variant_name``/``banner_template``/``title_marker``/``metrics_key``/``metrics_note``
+    (v2.4) let ``src.models.vacancy_gate`` reuse this exact regeneration logic for its own
+    gate output files without duplicating it -- every default matches this module's
+    pre-v2.4 behavior exactly.
     """
     report_md = train.generate_report(result, pytest_summary=None)
     title_line, _, rest = report_md.partition("\n")
-    title_line = title_line.replace("(v1.7 fixes)", "(v2.2 efficiency gate, frozen-hyperparameter retrain)")
-    banner = _gate_banner(pos, extra_cols, gate_table, spec.artifact_path)
+    title_line = title_line.replace("(v1.7 fixes)", title_marker)
+    banner = _gate_banner(pos, extra_cols, gate_table, spec.artifact_path, variant_name=variant_name, banner_template=banner_template)
     report_md = f"{title_line}\n\n{banner}\n{rest.lstrip(chr(10))}"
     spec.report_path.parent.mkdir(parents=True, exist_ok=True)
     spec.report_path.write_text(report_md)
 
     metrics = train._metrics_to_jsonable(result)
-    metrics["v2_2_efficiency_gate"] = {
-        "promoted": True,
-        "new_columns": extra_cols,
-        "note": "frozen-hyperparameter retrain via src.models.efficiency_gate -- see outputs/efficiency_gate.md",
-    }
+    metrics[metrics_key] = {"promoted": True, "new_columns": extra_cols, "note": metrics_note}
     spec.metrics_json_path.write_text(json.dumps(metrics, indent=2, default=str))
     return metrics
 
@@ -519,9 +573,22 @@ def write_gate_outputs(spec: train.PositionSpec, result: dict, pos: str, extra_c
 # --------------------------------------------------------------------------
 
 
-def run_position(pos: str) -> dict | None:
+def _run_gate_position(
+    pos: str, *, extra_cols: list[str], variant_name: str = "plus_efficiency",
+    banner_template: str = _GATE_BANNER_TEMPLATE,
+    title_marker: str = "(v2.2 efficiency gate, frozen-hyperparameter retrain)",
+    metrics_key: str = "v2_2_efficiency_gate", metrics_note: str = "frozen-hyperparameter retrain via src.models.efficiency_gate -- see outputs/efficiency_gate.md",
+) -> dict | None:
+    """The engine both ``run_position`` (v2.2 efficiency columns) and
+
+    ``src.models.vacancy_gate.run_vacancy_position`` (v2.4 vacancy columns) delegate to --
+    everything about the frozen-hyperparameter refit/compare/promote protocol is identical
+    between the two gates, only WHICH columns and WHAT the report calls itself differ (see
+    each keyword's docstring on ``write_gate_outputs``/``_gate_banner`` above). Kept private
+    (leading underscore) since ``extra_cols``/``variant_name`` must stay in sync with each
+    other -- callers go through the two named wrappers, not this directly.
+    """
     spec = train.position_spec(pos)
-    extra_cols = new_columns_for(pos)
     if not extra_cols:
         return None
     if not spec.artifact_path.exists():
@@ -558,13 +625,22 @@ def run_position(pos: str) -> dict | None:
         incumbent_score = score_incumbent(bundle, holdout_df)
         variant_score, fitted = fit_and_score_efficiency_variant(bundle, df, extra_cols, folds, split)
 
-    table = metrics_table(holdout_df, incumbent_score, variant_score)
-    keep, reason = gate_decision(table)
+    table = metrics_table(holdout_df, incumbent_score, variant_score, variant_name=variant_name)
+    keep, reason = gate_decision(table, variant_name=variant_name)
 
     promoted_info = None
     if keep:
         promoted_info = promote_position(spec, bundle, df, fitted)
-        write_gate_outputs(spec, promoted_info["result"], pos, extra_cols, table)
+        write_gate_outputs(
+            spec, promoted_info["result"], pos, extra_cols, table,
+            variant_name=variant_name, banner_template=banner_template, title_marker=title_marker,
+            metrics_key=metrics_key, metrics_note=metrics_note,
+        )
+        # v2.4: symmetric with add_to_excluded_features below -- a no-op for any caller
+        # (e.g. this module's own v2.2 run_position) whose candidate columns were never
+        # pre-populated into excluded_features to begin with; see
+        # remove_from_excluded_features's own docstring for why this is needed at all.
+        remove_from_excluded_features(spec.config_path, extra_cols)
         print(f"  {pos}: KEPT -- bundle regenerated at {spec.artifact_path}")
         print(f"  {pos}: wrote {spec.report_path}")
         print(f"  {pos}: wrote {spec.metrics_json_path}")
@@ -576,6 +652,10 @@ def run_position(pos: str) -> dict | None:
         "position": pos, "label": spec.label_position, "extra_cols": extra_cols,
         "table": table, "keep": keep, "reason": reason, "promoted_info": promoted_info,
     }
+
+
+def run_position(pos: str) -> dict | None:
+    return _run_gate_position(pos, extra_cols=new_columns_for(pos))
 
 
 def _null_rates(pos: str) -> dict[str, float]:

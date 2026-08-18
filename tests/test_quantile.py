@@ -9,6 +9,9 @@ this repo's existing ``_skip_if_*`` convention (see tests/test_models_positions.
 
 from __future__ import annotations
 
+import json
+
+import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -344,3 +347,52 @@ def test_comparison_gate_table_schema() -> None:
     assert set(table["primary_engine"]) <= {"quantile", "classifier"}
     assert pj.COMPARISON_GATE_JSON_PATH.exists()
     assert pj.COMPARISON_GATE_MD_PATH.exists()
+
+
+# --------------------------------------------------------------------------
+# v2.4: quantile bundle/report consistency -- extends efficiency_gate's binding
+# "outputs/model_{pos}_metrics.json must never drift from the SHIPPED bundle it claims to
+# describe" 1e-6 test (tests/test_efficiency_gate.py) to the quantile artifacts, which had
+# no such check before this session's vacancy gate gave the quantile head a promotion path
+# of its own (src.models.vacancy_gate.promote_quantile_position).
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pos", _POSITIONS)
+def test_quantile_metrics_json_holdout_matches_shipped_bundle(pos: str) -> None:
+    """outputs/model_{pos}_quantile_metrics.json's holdout spearman/pinball(q50) must match
+
+    a FRESH recompute straight from the shipped bundle (data/models/{pos}_quantile_bundle.
+    joblib) within 1e-6 -- the identical report/bundle-drift guard
+    test_efficiency_gate.test_metrics_json_pooled_holdout_pr_auc_matches_shipped_bundle
+    enforces for the classifier, applied to the quantile bundle instead.
+    """
+    spec = qm.quantile_spec(pos)
+    if not (spec.artifact_path.exists() and spec.metrics_json_path.exists()):
+        pytest.skip(f"{pos}: quantile bundle or metrics.json not built")
+    if not (spec.features_path.exists() and spec.labels_path.exists()):
+        pytest.skip(f"{pos}: features/labels parquet not built")
+
+    bundle = joblib.load(spec.artifact_path)
+    df = qm.load_modeling_frame(spec.features_path, spec.labels_path, cfg=bundle["cfg"])
+    holdout_df = df[df["season"].isin(qm.train.HOLDOUT_SEASONS)]
+    if holdout_df.empty:
+        pytest.skip(f"{pos}: quantile holdout frame is empty")
+
+    recomputed_wide = qm.score_quantiles(bundle, holdout_df)
+    recomputed_metrics = qm.distribution_metrics(recomputed_wide)
+
+    metrics = json.loads(spec.metrics_json_path.read_text())
+    shipped_holdout = metrics.get("holdout_metrics")
+    assert shipped_holdout is not None, f"{pos}: quantile metrics.json has no holdout_metrics block"
+
+    assert abs(recomputed_metrics["spearman_q50_actual"] - shipped_holdout["spearman_q50_actual"]) < 1e-6, (
+        f"{pos}: quantile metrics.json holdout Spearman(q50,actual) ({shipped_holdout['spearman_q50_actual']}) "
+        f"does not match a fresh recompute from the shipped bundle ({recomputed_metrics['spearman_q50_actual']}) "
+        "-- report/bundle drift"
+    )
+    assert abs(recomputed_metrics["pinball_by_alpha"]["0.50"] - shipped_holdout["pinball_by_alpha"]["0.50"]) < 1e-6, (
+        f"{pos}: quantile metrics.json holdout pinball(q50) ({shipped_holdout['pinball_by_alpha']['0.50']}) "
+        f"does not match a fresh recompute from the shipped bundle ({recomputed_metrics['pinball_by_alpha']['0.50']}) "
+        "-- report/bundle drift"
+    )

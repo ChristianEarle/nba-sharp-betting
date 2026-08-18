@@ -322,3 +322,62 @@ def test_build_ecr_trajectory_falls_back_to_no_cap_when_schedule_missing(monkeyp
 
     dates = set(all_ranked.select("scrape_date").unique().get_column("scrape_date").to_list())
     assert dates == {dt.date(2026, 6, 15), dt.date(2026, 8, 20), dt.date(2026, 9, 15)}
+
+
+# --------------------------------------------------------------------------
+# v2.4: peer-rank-only display -- the dashboard payload carries cohort_rank/value_gap
+# (cohort-based) only; predicted_finish_rank/value_gap_typical stay CSV-only for analysts
+# and are never sent to the dashboard row payload.
+# --------------------------------------------------------------------------
+
+
+def test_board_rows_never_carry_predicted_finish_rank_or_typical_value_gap(assembled) -> None:
+    payload, _ = assembled
+    veteran_rows = [r for r in payload["board"] if "cr" in r]
+    if not veteran_rows:
+        pytest.skip("no veteran rows with a cohort_rank on the board payload")
+    for r in veteran_rows:
+        assert "pfr" not in r, "predicted_finish_rank ('pfr') must not reach the dashboard payload (peer-rank-only display)"
+        assert "vgc" not in r, "the old cohort-based-alongside key ('vgc') is retired -- 'vg' is cohort-based now"
+
+
+def test_board_rows_vg_matches_csv_cohort_based_value_gap(assembled) -> None:
+    """`vg` (the payload's displayed/colored Value gap) must equal the board CSV's
+
+    cohort-based `value_gap` column, not `value_gap_typical` -- the peer-rank-only
+    display default as of this session (see src.dashboard.build.board_rows's docstring).
+    """
+    payload, _ = assembled
+    csv_df = pd.read_csv(bd.BOARD_CSV_PATH)
+    csv_df = csv_df[csv_df["value_gap"].notna()]
+    if csv_df.empty:
+        pytest.skip("no board rows with a non-null value_gap")
+    # board CSV carries no gsis_id column (see _assign_player_keys's docstring) -- match
+    # on (player_name, pos) instead of trying to reconstruct the payload's gsis_id key.
+    by_name_pos: dict[tuple[str, str], dict] = {}
+    for r in payload["board"]:
+        by_name_pos.setdefault((r["n"], r["p"]), r)
+    checked = 0
+    for _, row in csv_df.iterrows():
+        payload_row = by_name_pos.get((row["player_name"], row["pos"]))
+        if payload_row is None or payload_row.get("vg") is None:
+            continue
+        assert payload_row["vg"] == pytest.approx(float(row["value_gap"]), abs=1e-6)
+        checked += 1
+    assert checked > 0, "no rows resolved between the CSV and the dashboard payload to compare"
+
+
+# --------------------------------------------------------------------------
+# v2.4: low-octane-offense chip fields
+# --------------------------------------------------------------------------
+
+
+def test_board_rows_carry_low_octane_fields(assembled) -> None:
+    payload, _ = assembled
+    veteran_rows = [r for r in payload["board"] if "cr" in r]
+    if not veteran_rows:
+        pytest.skip("no veteran rows on the board payload")
+    assert all("loc" in r for r in veteran_rows), "every veteran row must carry the 'loc' low-octane-offense flag"
+    flagged = [r for r in veteran_rows if r["loc"]]
+    for r in flagged:
+        assert r.get("locsrc") in {"Vegas", "est.", "unknown"}, r.get("locsrc")

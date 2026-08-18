@@ -68,6 +68,15 @@ choice made)
   season rate stats (every team the player played for that year) — no
   team scoping needed, same as WR's targets_pg/adot/td_rate family.
 
+v2.4 addition (team-change/vacancy, gated -- src.models.vacancy_gate): vacated_td_share
+only (share of the team's N-1 offensive TDs belonging to players absent from its
+Week-1 season-N roster) -- a team-context fact like vacated_target_share/
+vacated_carry_share above. qb_continuity (this feature family's other WR/TE/RB
+column) is deliberately NOT wired here: it answers "how much of this team's N-1
+passing volume is still on the roster," which is meaningless self-reference for the
+QB row itself. max_single_vacated_share/vacated_goal_line_carry_share likewise have
+no QB-specific meaning the brief defines.
+
 Skipped by design (documented per the brief, not implemented here):
 red-zone/goal-line pass attempt share (needs play-by-play, deferred),
 depth chart position (no 2025 depth-chart snapshot available), offensive-
@@ -142,6 +151,7 @@ _OUT_COLUMNS = (
         "young_stayer",
         "moved_into_vacancy",
     ]
+    + sh.VACANCY_COLUMNS_QB
 )
 
 
@@ -354,6 +364,12 @@ def build_features_qb(
         .cast(pl.Int64)
         .alias("moved_into_vacancy")
     )
+
+    # v2.4: vacated_td_share only (see src.features.shared.VACANCY_COLUMNS_QB's docstring --
+    # qb_continuity is meaningless for the thrower himself, so it's skipped here by design;
+    # vacated_td_share is a team-context fact like vacated_target_share/vacated_carry_share
+    # above, gated the same way (src.models.vacancy_gate) before shipping in this model).
+    out = out.join(sh.vacated_td_share_table(reg, season_team), on=["season", "team"], how="left")
 
     out = out.with_columns(pl.min_horizontal(pl.col("years_exp"), pl.lit(10)).alias("year_in_league"))
     out = sh.add_covid_flag(out)
