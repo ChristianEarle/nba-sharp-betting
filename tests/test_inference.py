@@ -114,6 +114,7 @@ REQUIRED_BOARD_COLUMNS = [
     "rationale",
     "section",
     "probability_heuristic",
+    "broke_out_last_season",
 ]
 
 
@@ -300,3 +301,108 @@ def test_2026_new_hc_is_not_all_null(pos: str) -> None:
     """
     df = _feature_matrix(pos)
     assert df.get_column("new_hc").null_count() < df.height, f"{pos}: new_hc is entirely null for 2026"
+
+
+# --------------------------------------------------------------------------
+# v2.1 Deliverable 3: driver-chip honesty fix
+# --------------------------------------------------------------------------
+
+
+def test_shap_top3_binary_chips_never_self_contradict() -> None:
+    """team_change/new_hc chips must reflect the feature's actual VALUE, not just its
+
+    name + SHAP sign -- the pre-v2.1 bug ("New team +" rendering for team_change=0
+    players). A single player's binary-feature state is a single fact, so a chip
+    string can never claim both mutually-exclusive states for the same feature
+    (e.g. both "Stayed put" and "New team", or both coach-continuity states).
+    """
+    df = _board_df()
+    if "shap_top3" not in df.columns:
+        pytest.skip("shap_top3 not in board CSV")
+    s = df["shap_top3"].astype(str)
+    for lo, hi in board_2026.BINARY_FEATURE_STATES.values():
+        contradictions = df[s.str.contains(lo, na=False, regex=False) & s.str.contains(hi, na=False, regex=False)]
+        assert contradictions.empty, f"a shap_top3 row claims both {lo!r} and {hi!r} at once"
+
+
+def test_shap_top3_no_bare_article_after_elite_thin() -> None:
+    """Grammar regression guard: 'Elite a ...'/'Thin a ...' (a leading article surviving
+
+    the Elite/Thin/Rising/Falling prefix) must never appear -- honest_state_label strips
+    it (see src.inference.board_2026.honest_state_label).
+    """
+    df = _board_df()
+    if "shap_top3" not in df.columns:
+        pytest.skip("shap_top3 not in board CSV")
+    bad = df["shap_top3"].astype(str).str.contains(
+        r"(?:Elite|Thin|Rising|Falling) (?:a|an|the) ", regex=True, na=False
+    )
+    assert not bad.any(), f"{int(bad.sum())} shap_top3 rows have a leading-article grammar bug"
+
+
+def test_honest_state_label_binary_reflects_value() -> None:
+    lo, hi = board_2026.BINARY_FEATURE_STATES["team_change"]
+    assert board_2026.honest_state_label("team_change", 0, None) == lo
+    assert board_2026.honest_state_label("team_change", 1, None) == hi
+    assert board_2026.honest_state_label("new_hc", 1, None) == board_2026.BINARY_FEATURE_STATES["new_hc"][1]
+    assert board_2026.honest_state_label("new_hc", 0, None) == board_2026.BINARY_FEATURE_STATES["new_hc"][0]
+
+
+def test_honest_state_label_continuous_reflects_value_vs_median() -> None:
+    assert board_2026.honest_state_label("target_share_n1", 0.9, 0.2).startswith("Elite")
+    assert board_2026.honest_state_label("target_share_n1", 0.05, 0.2).startswith("Thin")
+    # lower-is-better feature: a below-median age is "Elite", not "Thin".
+    assert board_2026.honest_state_label("age", 22, 27).startswith("Elite")
+    assert board_2026.honest_state_label("age", 32, 27).startswith("Thin")
+    # missing median -> no state claim invented, falls back to the plain label.
+    assert board_2026.honest_state_label("target_share_n1", 0.9, None) == board_2026._humanize_feature(
+        "target_share_n1"
+    )
+
+
+# --------------------------------------------------------------------------
+# v2.1 addendum: "broke out last season" transparency badge
+# --------------------------------------------------------------------------
+
+
+def test_broke_out_last_season_matches_labels() -> None:
+    """Every board row flagged broke_out_last_season=True must have a real
+
+    breakout==1 row in labels.parquet's season==2025 -- and every 2025 breakout
+    player who is also on the 2026 board must be flagged (both directions).
+    """
+    if not train.LABELS_PATH.exists():
+        pytest.skip("labels.parquet not built")
+    df = _board_df()
+    if "broke_out_last_season" not in df.columns:
+        pytest.skip("broke_out_last_season not in board CSV")
+
+    labels = pl.read_parquet(train.LABELS_PATH)
+    broke_out_names = set(
+        labels.filter((pl.col("season") == 2025) & (pl.col("breakout") == 1))
+        .get_column("player_name")
+        .to_list()
+    )
+    flagged = set(df[df["broke_out_last_season"] == True]["player_name"])  # noqa: E712
+    assert flagged <= broke_out_names, f"flagged players not actually 2025 breakouts: {flagged - broke_out_names}"
+
+    on_board_veterans = set(df[df["section"] == "veteran"]["player_name"])
+    should_be_flagged = broke_out_names & on_board_veterans
+    assert should_be_flagged <= flagged, f"2025 breakouts on the board but not flagged: {should_be_flagged - flagged}"
+
+
+def test_broke_out_last_season_is_boolean() -> None:
+    df = _board_df()
+    if "broke_out_last_season" not in df.columns:
+        pytest.skip("broke_out_last_season not in board CSV")
+    assert df["broke_out_last_season"].isin([True, False]).all()
+
+
+def test_broke_out_last_season_rookies_never_flagged() -> None:
+    df = _board_df()
+    if "broke_out_last_season" not in df.columns:
+        pytest.skip("broke_out_last_season not in board CSV")
+    rookies = df[df["section"] == "rookie (heuristic)"]
+    if rookies.empty:
+        pytest.skip("no rookie rows on the board")
+    assert not rookies["broke_out_last_season"].any(), "a 2026 rookie cannot have broken out in 2025"

@@ -1,4 +1,4 @@
-.PHONY: refresh retrain test board dashboard dashboard-build
+.PHONY: refresh retrain test board dashboard dashboard-build quantile gate pooled-experiment
 
 # All targets assume `uv sync --extra dev` has already been run once; see README Setup.
 
@@ -45,8 +45,37 @@ retrain: refresh
 	uv run python -m src.models.rookie_heuristic
 	@echo ">> retrain: SHAP global beeswarm plots (outputs/shap_{pos}.png)"
 	uv run python -m src.explain.shap_report
+	@echo ">> retrain: v2.0 quantile regression heads (WR/RB/TE/QB)"
+	uv run python -m src.models.quantile
+	@echo ">> retrain: v2.0 rank thresholds + Deliverable-3 comparison gate"
+	uv run python -m src.inference.projections
 	@echo ">> retrain: re-scoring outputs/breakout_board_2026.{csv,md} with freshly retrained bundles"
 	uv run python -m src.inference.board_2026
+
+# v2.0 quantile regression heads only (WR/RB/TE/QB) -- does not touch the v1.7
+# classifier bundles. Run this after `refresh` if you only want to refresh the
+# projection side of the board.
+quantile:
+	@echo ">> quantile: WR/RB/TE/QB quantile regression heads (full Optuna config)"
+	uv run python -m src.models.quantile
+
+# v2.0 Deliverable 3: rebuilds data/processed/rank_thresholds.parquet and reruns
+# the comparison gate (outputs/comparison_gate.{json,md}) from whatever
+# classifier + quantile bundles already exist on disk.
+gate:
+	@echo ">> gate: rank thresholds + Deliverable-3 comparison gate"
+	uv run python -m src.inference.projections
+
+# v2.1 Deliverable 2: pooled-position classifier experiment (real Optuna
+# config -- 60 classifier trials x2 model types x4 folds x3 seeds, TWO arms
+# -- takes a while, comparable to one position's own retrain). Writes
+# outputs/pooled_experiment.{md,json} and prints the per-position gate
+# verdict. Does not touch any production bundle by itself -- promoting a
+# position per its verdict is a separate, manual retrain step (see README's
+# v2.1 section).
+pooled-experiment:
+	@echo ">> pooled-experiment: v2.1 Deliverable 2 pooled + pruned-pooled classifier, comparison gate"
+	uv run python -m src.models.pooled_experiment
 
 # Full pytest suite.
 test:

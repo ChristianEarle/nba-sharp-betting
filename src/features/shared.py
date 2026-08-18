@@ -796,6 +796,263 @@ def attach_vegas_team(
     return out.with_columns(pl.col("has_vegas").fill_null(0))
 
 
+
+# --------------------------------------------------------------------------
+# v2.1 derived depth/competition features. The nflverse ``depth_charts``
+# table stops at 2024 (see README's "Known data issues") and ships a
+# schema-incompatible payload for 2026 -- unusable for a pipeline that must
+# score the current offseason. Everything below derives an equivalent
+# "who's ahead of whom on the depth chart" signal purely from data that
+# exists for every season including 2026: prior-season (N-1) usage plus the
+# season-N Week-1 roster (``season_roster_team``/``season_roster_position``
+# below) -- the same two ingredients ``vacated_shares`` already combines,
+# just read for the "stayed" half of the population instead of the
+# "departed" half.
+# --------------------------------------------------------------------------
+
+
+def season_roster_position(rosters: pl.DataFrame, rosters_weekly: pl.DataFrame) -> pl.DataFrame:
+    """season, gsis_id -> position: Week-1 roster position.
+
+    Same two-level fallback as ``season_roster_team`` (earliest available
+    REG week that season, else ``rosters.parquet``'s season-level
+    ``position`` column when a player has no ``rosters_weekly`` REG row at
+    all that season) -- deliberately mirrors that function rather than
+    reusing its output, because depth/competition features need each
+    player's position *on the season-N roster itself*, not the position he
+    produced N-1 stats at (``player_stats.position`` has nothing for 2026 —
+    no games played yet — while ``rosters_weekly``/``rosters`` both do).
+    """
+    reg = rosters_weekly.filter((pl.col("game_type") == "REG") & pl.col("gsis_id").is_not_null())
+    reg = reg.with_columns(pl.when(pl.col("status") == "ACT").then(0).otherwise(1).alias("_status_rank"))
+    reg = reg.sort(["season", "gsis_id", "week", "_status_rank"]).unique(
+        subset=["season", "gsis_id", "week"], keep="first"
+    )
+    weekly_pos = (
+        reg.sort(["season", "gsis_id", "week"])
+        .unique(subset=["season", "gsis_id"], keep="first")
+        .select("season", "gsis_id", "position")
+    )
+
+    season_level = (
+        rosters.filter(pl.col("gsis_id").is_not_null())
+        .sort(["season", "gsis_id", "week"])
+        .unique(subset=["season", "gsis_id"], keep="last")
+        .select("season", "gsis_id", "position")
+    )
+    fallback_only = season_level.join(weekly_pos.select("season", "gsis_id"), on=["season", "gsis_id"], how="anti")
+
+    return pl.concat([weekly_pos, fallback_only], how="vertical_relaxed").select("season", "gsis_id", "position")
+
+
+def returning_incumbent_share_table(
+    reg: pl.DataFrame,
+    season_team: pl.DataFrame,
+    *,
+    position: str,
+    usage_col: str,
+    team_total_col: str,
+) -> pl.DataFrame:
+    """season (N), team -> returning_incumbent_share.
+
+    Sum of N-1 team-relative usage share (``usage_col`` / ``team_total_col``
+    -- targets/team_targets for WR/TE, carries/team_carries for RB) of
+    ``position`` players who played for that team in season N-1 AND are
+    still on that team's season-N roster (per ``season_team`` --
+    ``season_roster_team``). Structurally the mirror image of
+    ``vacated_shares`` (same ``player_team_usage``/``team_usage_totals``
+    building blocks, opposite half of the N-1 population: "stayed", not
+    "departed"). A team-context fact broadcast to every row on that team,
+    not player-specific -- a returning player's own N-1 share counts toward
+    his own team's total the same self-inclusive way ``target_share``'s own
+    team-total denominator already includes the player's own targets; this
+    is a deliberate simplification (a returning starter's own share is
+    "returning competition" for depth-chart purposes exactly as much as
+    anyone else's), not an oversight.
+    """
+    pos_reg = reg.filter(pl.col("position") == position)
+    usage = player_team_usage(pos_reg)
+    totals = team_usage_totals(reg)
+    shares = usage.join(totals, on=["season", "team"], how="left")
+    shares = shares.with_columns(safe_div(pl.col(usage_col), pl.col(team_total_col)).alias("_share"))
+
+    lookup = season_team.select("season", "gsis_id", pl.col("team").alias("season_n_team")).with_columns(
+        (pl.col("season") - 1).alias("season")
+    )
+    shares = shares.join(lookup, on=["season", "gsis_id"], how="left")
+    returning = shares.filter(pl.col("season_n_team") == pl.col("team"))
+
+    out = returning.group_by(["season", "team"]).agg(pl.col("_share").sum().alias("returning_incumbent_share"))
+    return out.with_columns((pl.col("season") + 1).alias("season"))
+
+
+def depth_rank_table(
+    season_roster_team_pos: pl.DataFrame,
+    raw_share_n1: pl.DataFrame,
+    *,
+    position: str,
+    share_col: str,
+) -> pl.DataFrame:
+    """season (N), gsis_id -> depth_rank_derived: rank within the player's season-N team's
+
+    same-``position`` group, ordered descending by each player's own N-1 ``share_col`` value
+    (his real share wherever he actually played in N-1 -- ``raw_share_n1`` is the position
+    module's own unshifted raw stat table, e.g. ``target_share``/``carry_share`` before the
+    ``_n1``-suffix shift is applied; this function does the N-1 -> N shift itself). 1 = highest
+    N-1 share on the roster, i.e. presumptive top of the depth chart.
+
+    ``season_roster_team_pos`` is (season, gsis_id, team, position) for the *entire* season-N
+    roster at ``position`` -- not just the labeled (non-rookie) population, since a depth chart
+    includes rookies too (they simply rank last: ``pl.Expr.rank`` leaves a null ``share_col``
+    row's rank null rather than assigning it a number, which is exactly "nulls last" and also
+    means including/excluding rookies from the ranking pool never changes a non-null player's
+    rank). Nullable by design: a player with no N-1 share at all (rookie, or out of the league
+    in N-1) gets a null rank, per the brief.
+    """
+    roster = season_roster_team_pos.filter(pl.col("position") == position).select("season", "team", "gsis_id")
+    share_n1 = raw_share_n1.select("season", "gsis_id", share_col).with_columns((pl.col("season") + 1).alias("season"))
+    # De-dupe defensively before the join: season_roster_team_pos should already be one row
+    # per (season, gsis_id), but guards against a stray duplicate silently double-weighting
+    # a tie. method="min" (not "ordinal"): two players tied on N-1 share must get the SAME
+    # rank -- "ordinal" would break the tie by incidental row order, which is not guaranteed
+    # stable across two structurally different builds of the same underlying values (verified
+    # by the structural leakage test failing under "ordinal" when unrelated pbp rows were
+    # perturbed -- share values were identical, only tie-break row order differed).
+    roster = roster.unique(subset=["season", "gsis_id"], keep="first")
+    j = roster.join(share_n1, on=["season", "gsis_id"], how="left")
+    j = j.with_columns(
+        pl.col(share_col).rank(method="min", descending=True).over(["season", "team"]).alias("depth_rank_derived")
+    )
+    return j.select("season", "gsis_id", pl.col("depth_rank_derived").cast(pl.Int64))
+
+
+def attach_depth_movement(df: pl.DataFrame, depth_all: pl.DataFrame) -> pl.DataFrame:
+    """Join depth_rank_derived (season N) + depth_rank_derived_n1 (season N-1's own rank,
+
+    read off the *same* ``depth_rank_table`` output one season earlier and shifted forward)
+    onto ``df``, plus the two composites: ``depth_moved_up`` = depth_rank_derived_n1 -
+    depth_rank_derived (positive = climbed the pecking order into season N -- e.g. #3 in the
+    room last year, #1 now) and ``became_presumptive_starter`` = (depth_rank_derived == 1) AND
+    (depth_rank_derived_n1 >= 2) (the classic "backup inherits the job" breakout setup).
+
+    ``depth_all`` is ``depth_rank_table``'s full output (every season it covers, not just the
+    label seasons) -- its own row for season N already used N-1 usage + season-N roster (see
+    that function's docstring); its row for season N-1 (attached here, shifted +1 to
+    ``depth_rank_derived_n1``) used N-2 usage + season-N-1 roster by the identical
+    construction. Both null-safe: a player with no derivable rank in either season yields null
+    ``depth_moved_up``/``became_presumptive_starter``, never a false 0/1.
+    """
+    out = df.join(depth_all, on=["season", "gsis_id"], how="left")
+    n1 = depth_all.select(
+        "season", "gsis_id", pl.col("depth_rank_derived").alias("depth_rank_derived_n1")
+    ).with_columns((pl.col("season") + 1).alias("season"))
+    out = out.join(n1, on=["season", "gsis_id"], how="left")
+    out = out.with_columns(
+        pl.when(pl.col("depth_rank_derived").is_null() | pl.col("depth_rank_derived_n1").is_null())
+        .then(None)
+        .otherwise(pl.col("depth_rank_derived_n1") - pl.col("depth_rank_derived"))
+        .alias("depth_moved_up")
+    )
+    out = out.with_columns(
+        pl.when(pl.col("depth_rank_derived").is_null() | pl.col("depth_rank_derived_n1").is_null())
+        .then(None)
+        .otherwise((pl.col("depth_rank_derived") == 1) & (pl.col("depth_rank_derived_n1") >= 2))
+        .cast(pl.Int64)
+        .alias("became_presumptive_starter")
+    )
+    return out
+
+
+def returning_qb_starter_flag(reg: pl.DataFrame, season_team: pl.DataFrame) -> pl.DataFrame:
+    """season (N), gsis_id -> returning_starter: QB's analogue of returning_incumbent_share.
+
+    1 if a QB *other than the row's own player* who threw more than 50% of the team's season
+    N-1 pass attempts is still on that team's season-N roster; 0 if no such returning starter
+    exists; null if the team has no N-1 QB pass-attempt data at all (first-data-year/expansion
+    edge case) to determine a starter from in the first place -- "nullable where underlying
+    data is missing," per the brief. Unlike ``returning_incumbent_share`` (a team-level share
+    sum, self-inclusive), this is a boolean flag that explicitly excludes the row's own player
+    per the brief's own QB wording ("who isn't the player himself") -- a returning starter QB
+    cannot be his own competition.
+    """
+    qb_reg = reg.filter(pl.col("position") == "QB")
+    qb_att = (
+        qb_reg.group_by(["season", "player_id", "team"])
+        .agg(pl.col("attempts").sum().alias("qb_attempts"))
+        .rename({"player_id": "gsis_id"})
+    )
+    team_att = qb_reg.group_by(["season", "team"]).agg(pl.col("attempts").sum().alias("team_qb_attempts"))
+    joined = qb_att.join(team_att, on=["season", "team"], how="left")
+    joined = joined.with_columns(safe_div(pl.col("qb_attempts"), pl.col("team_qb_attempts")).alias("share"))
+    starters = joined.filter(pl.col("share") > 0.5).select("season", "team", "gsis_id")
+    starters_n = starters.with_columns((pl.col("season") + 1).alias("season"))
+
+    roster_check = season_team.select("season", "gsis_id", "team")
+    starters_returning = starters_n.join(roster_check, on=["season", "team", "gsis_id"], how="inner").rename(
+        {"gsis_id": "starter_id"}
+    )
+
+    team_had_n1 = (
+        team_att.select("season", "team")
+        .with_columns((pl.col("season") + 1).alias("season"), pl.lit(1).alias("_had_n1"))
+    )
+
+    all_rows = season_team.select("season", "gsis_id", "team")
+    out = all_rows.join(starters_returning.select("season", "team", "starter_id"), on=["season", "team"], how="left")
+    out = out.join(team_had_n1, on=["season", "team"], how="left")
+    out = out.with_columns(
+        pl.when(pl.col("_had_n1").is_null())
+        .then(None)
+        .when(pl.col("starter_id").is_null())
+        .then(0)
+        .otherwise((pl.col("starter_id") != pl.col("gsis_id")).cast(pl.Int64))
+        .alias("returning_starter")
+    )
+    return out.group_by(["season", "gsis_id"]).agg(pl.col("returning_starter").max())
+
+
+def attach_young_stayer(df: pl.DataFrame) -> pl.DataFrame:
+    """young_stayer = (age <= 24) AND (team_change == 0); null if either input is null.
+
+    Explicit composite (per the brief: trees can't reliably learn interactions at these
+    sample sizes -- 27-48 positives per position). ``df`` must carry ``age``/``team_change``.
+    """
+    return df.with_columns(
+        pl.when(pl.col("age").is_null() | pl.col("team_change").is_null())
+        .then(None)
+        .otherwise((pl.col("age") <= 24) & (pl.col("team_change") == 0))
+        .cast(pl.Int64)
+        .alias("young_stayer")
+    )
+
+
+def attach_path_to_volume(df: pl.DataFrame, vacated_col: str) -> pl.DataFrame:
+    """path_to_volume = df[vacated_col] - returning_incumbent_share (signed).
+
+    Positive = the season-N team's vacated opportunity (departed players' N-1 share) exceeds
+    the returning competition already on the roster -- i.e. the path to volume is relatively
+    open. Null if either input is null. ``df`` must carry ``returning_incumbent_share`` and
+    ``vacated_col`` (``vacated_target_share`` for WR/TE, ``vacated_carry_share`` for RB).
+    """
+    return df.with_columns(
+        pl.when(pl.col(vacated_col).is_null() | pl.col("returning_incumbent_share").is_null())
+        .then(None)
+        .otherwise(pl.col(vacated_col) - pl.col("returning_incumbent_share"))
+        .alias("path_to_volume")
+    )
+
+
+def attach_moved_into_vacancy(df: pl.DataFrame, vacated_col: str) -> pl.DataFrame:
+    """moved_into_vacancy = (team_change == 1) AND (df[vacated_col] > 0.25); null if either input is null."""
+    return df.with_columns(
+        pl.when(pl.col("team_change").is_null() | pl.col(vacated_col).is_null())
+        .then(None)
+        .otherwise((pl.col("team_change") == 1) & (pl.col(vacated_col) > 0.25))
+        .cast(pl.Int64)
+        .alias("moved_into_vacancy")
+    )
+
+
 def add_covid_flag(df: pl.DataFrame, season_col: str = "season") -> pl.DataFrame:
     """label_season_2020: 1 if the label season N is 2020 OR its N-1 stats season is 2020 (N==2021).
 
